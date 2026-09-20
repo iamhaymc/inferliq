@@ -10,16 +10,15 @@ standing results is the argument for it. Decode reads every weight once a
 token, so its rate is bytes over bandwidth and there are only two moves: read
 fewer bytes, or get more than one token out of a read. Both have now been made
 once — q4 for the first, `--draft` for the second — and both left something
-behind. q4 came off the memory ceiling and is now held by its own kernel, and
-it gives up on confident text what it saves in bytes; `--draft` only engages
-for greedy sampling, which is not how most callers decode. The items at the
-top are those two debts. Prefill is arithmetic bound and still has room.
-Everything below that is coverage, reliability and reach.
+behind. q4 gives up on confident text what it saves in bytes, and `--draft`
+only engages for greedy sampling, which is not how most callers decode. The
+items at the top are those two debts. Prefill is arithmetic bound and still has
+room. Everything below that is coverage, reliability and reach.
 
 ## Engine
 
 1. **A q4 that survives text the model is sure about.** q4 reads 0.55 of what
-   q8 reads and decodes 1.23x faster, and on ordinary prose it costs nothing a
+   q8 reads and decodes faster for it, and on ordinary prose it costs nothing a
    perplexity can see — but on text the model should find easy it nearly
    doubles perplexity, 0.68 nats a token to 1.26. That is where four bits over
    a 32 value block goes: not into the model's uncertainty, into its
@@ -41,15 +40,7 @@ Everything below that is coverage, reliability and reach.
    worth as a probability before writing any of it; that choice is the whole
    design.
 
-3. **Take q4 off the kernel ceiling.** q4 decode is the first thing in this
-   engine that is not waiting on memory: 11.9 tok/s over 1.57 GiB is 20.0 GB/s
-   against a 36.6 GB/s sweep, so a third of the machine's bandwidth is idle
-   while the unpack and the dot catch up. The byte count says 1.8x and the
-   measurement says 1.23x, and the difference is all arithmetic. It is also why
-   q4 prefill is 0.93x of q8's, since prefill has no arithmetic to spare. Fewer
-   instructions per unpacked block is the whole of it.
-
-4. **Fuse the attention score row.** Scores are materialised per head before
+3. **Fuse the attention score row.** Scores are materialised per head before
    the softmax, so the scratch grows with context and the row is written and
    read again for no reason. A flash-style tiling with a running maximum and a
    running sum keeps the row in registers, and it is the difference between
@@ -57,27 +48,27 @@ Everything below that is coverage, reliability and reach.
    **Decision**: the running softmax sums in a different order, so the output
    moves; re-take the parity run and say so.
 
-5. **Pack the weight panel for prefill.** `dense` streams weight rows in their
+4. **Pack the weight panel for prefill.** `dense` streams weight rows in their
    stored layout, so a prefill wide enough to reuse a panel still re-reads it
    from wherever it fell out to. A blocked panel layout would keep the reused
    half in cache. The companion move — fusing more activation rows against one
    weight row — is spent: eight is where the registers run out on a machine
    with thirty-two of them, and sixteen measured level with four.
 
-6. **An AMX path for the q8 dot where the host has one.** The VNNI path folds
+5. **An AMX path for the q8 dot where the host has one.** The VNNI path folds
    four byte products into a lane; AMX does a tile at a time and is the next
    step up on the hosts that carry it. It is worth less than it looks on a
    single sequence — AMX wants many activation rows to fill a tile, so this is
    a prefill item and a batching item, not a decode item.
 
-7. **Store the key/value cache at half width.** It is f32 today, which is the
+6. **Store the key/value cache at half width.** It is f32 today, which is the
    dominant term in state memory once the context is long — a 4096 token state
    is 0.15 GiB and the window the checkpoint advertises is 131072. bf16 halves
    it for a rounding error the keys and values already carry, since they were
    bf16 in the checkpoint. **Decision**: the scores change in the last bits, so
    the output moves.
 
-8. **Runtime SIMD dispatch.** The vector width is chosen at compile time, so a
+7. **Runtime SIMD dispatch.** The vector width is chosen at compile time, so a
    binary built with `-march=native` faults on an older host and a binary built
    to be portable leaves half the machine unused. This matters more now than it
    did: the fastest path is gated on VNNI, so the gap between the portable
@@ -86,7 +77,8 @@ Everything below that is coverage, reliability and reach.
    that runs everywhere at the width the host actually has. It is a reliability
    item before it is a speed item — the failure it removes is a crash with no
    diagnosis.
-9. **Rewind into the middle of a pass.** A mark can only be returned to at
+
+8. **Rewind into the middle of a pass.** A mark can only be returned to at
    the point it was taken, so a round that rejects a proposal drops the
    confirmed tokens back into the next round's pass and carries them there.
    That costs nothing in weight reads — the pass was going to happen — but it
@@ -97,78 +89,76 @@ Everything below that is coverage, reliability and reach.
    floats a token, so it is only affordable while a batch is small, which a
    drafted batch is.
 
+9. **Save and restore a prompt cache to disk.** A long shared prefix — a
+   system message, a document, a code file — is paid for at every start
+   today. Writing the state after the prefix and reading it back turns the
+   second run's prefill into a file read. The identity that says a cache
+   belongs to this prompt must be two independent mixes over the same bytes
+   with the shape compared beside them, as the keep file already is.
 
-10. **Prefetch the next panel while the current one is in flight.** Decode
-    streams gigabytes a token along an entirely predictable stride, and cores
-    waiting on that stride are cores doing nothing. Issuing a prefetch for the
-    rows a chore will reach next costs one instruction per cache line. Pair it
-    with NUMA-aware placement of the weight mapping on hosts with more than one
-    node, where the wrong node doubles the latency of every one of those reads.
-    This is the one item that could still find something in the decode kernel,
-    and the margin it is chasing is small — see the cost split.
-
-11. **Save and restore a prompt cache to disk.** A long shared prefix — a
-    system message, a document, a code file — is paid for at every start
-    today. Writing the state after the prefix and reading it back turns the
-    second run's prefill into a file read. The identity that says a cache
-    belongs to this prompt must be two independent mixes over the same bytes
-    with the shape compared beside them, as the keep file already is.
-
-12. **Grammar-constrained sampling.** A mask over the logits that admits only
+10. **Grammar-constrained sampling.** A mask over the logits that admits only
     tokens keeping the output valid against a grammar makes a malformed answer
     impossible rather than unlikely, which is worth more than any retry loop.
     Tool calling and JSON replies are the cases; the sampler layer is where the
     mask belongs, and the tokenizer already has the piece table the mask needs.
     Keep it to a grammar the engine can compile itself — no dependency.
 
-13. **Per-channel rather than per-block q8 scales**, as an alternative layout to
+11. **Per-channel rather than per-block q8 scales**, as an alternative layout to
     be measured against the current one. It trades a scale read per row for a
     scale read per block and may quantise better on rows with a flat range.
-    There is a second reason to look now: the paired dot spends three of its
-    eight operations building the two block scales into one vector, and a
-    layout with fewer scales in play would not need them.
+    There is a second reason to look now: a scale that does not change along
+    the row lets a whole row accumulate as integers and convert once, which
+    takes the conversion and the multiply-add out of the block loop as well as
+    the scale build 1.9.0 shortened.
 
-14. **Write a packed engine file**, so a q8 or q4 repack is done once rather
+12. **Write a packed engine file**, so a q8 or q4 repack is done once rather
     than at every load. Reading Hugging Face folders directly stays the
     default; this is a second path, not a replacement, and it must carry enough
     identity that a stale pack is detected rather than used.
 
-15. **Rotary scaling types beyond `default` and `linear`** — `yarn`, `llama3`,
+13. **Rotary scaling types beyond `default` and `linear`** — `yarn`, `llama3`,
     `dynamic`. The loader warns and falls back to plain rotary, which silently
     produces wrong positions past the training window on a checkpoint that uses
     one of these. This is a correctness gap wearing a coverage item's clothes.
 
-16. **Sliding window attention**, if a member of the family uses it. The layer
+14. **Sliding window attention**, if a member of the family uses it. The layer
     plan already carries a per-layer kind, so it is a third case rather than a
     change of shape.
 
-17. **The mixture-of-experts variant** (`model_type: "lfm2_moe"`). A router and
+15. **The mixture-of-experts variant** (`model_type: "lfm2_moe"`). A router and
     a per-token expert selection, which also makes the weight read per token
     depend on the routing — the one place in this engine where decode stops
     being a fixed stride.
 
-18. **Batched sequences: several states advanced in one forward pass**, which
+16. **Batched sequences: several states advanced in one forward pass**, which
     turns many single-token decodes into one wide matrix multiply. This is the
     serving item: it does nothing for one user and most of what a server needs.
-    `ill_state_mark` did the harder half of it, and item 6 wants it.
+    `ill_state_mark` did the harder half of it, and item 5 wants it.
 
-19. **Speed the added-token scan.** It is linear in the number of added tokens
+17. **Place the weight mapping on the node that reads it.** On a host with
+    more than one memory node the wrong node doubles the latency of every
+    weight read a decode makes, and nothing in the loader says which node a
+    mapping lands on. The chores are already split by row range, so the split
+    the placement wants is the split the pool already has.
+    **Blocked** on a host with more than one node.
+
+18. **Speed the added-token scan.** It is linear in the number of added tokens
     at every input position, and the published checkpoint has 124 of them. An
     Aho-Corasick automaton makes it linear in the input instead.
 
-20. **Evaluate the Jinja `chat_template`** for the subset chat templates
+19. **Evaluate the Jinja `chat_template`** for the subset chat templates
     actually use, so prompt shaping comes from the checkpoint rather than from
     detecting `<|im_start|>` in the vocabulary. Detection is a guess that
     happens to be right on this family; a checkpoint that shapes turns
     differently would be shaped wrongly and produce plausible nonsense.
 
-21. **Replace the character-class range table with generated Unicode property
+20. **Replace the character-class range table with generated Unicode property
     tables.** Runes below `0x80` follow the exact ASCII rule; above it a rune is
     a letter unless it falls in a listed range, and the ranges cover ordinary
     prose rather than every script. A checkpoint tokenised in a script outside
     them splits differently to the reference.
 
-22. **Unigram and WordPiece tokenizer models, and the Metaspace pre-tokenizer.**
+21. **Unigram and WordPiece tokenizer models, and the Metaspace pre-tokenizer.**
     Reported as `ILL_VOCAB` rather than approximated, which is the right
     refusal and still a refusal.
 

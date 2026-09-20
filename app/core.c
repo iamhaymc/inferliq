@@ -1300,6 +1300,24 @@ static inline IllQAcc ill_q8_step(IllQAcc acc, const int8_t *w, const int8_t *a,
 }
 #endif
 
+/* -- the two block scales, carried as one value ----------------------------
+ *
+ * A paired step multiplies each block's integer total by that block's weight
+ * scale and its activation scale, and on a machine with a paired dot the two
+ * products have to reach the multiply-add as one register with eight lanes of
+ * each.  Building that from the two scalar multiplies costs nine operations --
+ * four scalar loads, two multiplies, two broadcasts and an insert -- to feed a
+ * single fused multiply-add; broadcasting each pair straight out of memory and
+ * multiplying the two vectors costs five.  The weight side is also the same
+ * for every activation row in a tile, so it is lifted out of the tile loop and
+ * paid once per block pair rather than once per block pair per row.
+ *
+ * The arithmetic does not move: every lane still holds `ws[b] * xs[b]`, the
+ * same pair of floats through the same multiply, so the answer is the answer
+ * it was.  Off a paired build the carrier is the two floats themselves and the
+ * fallback pair reads them one at a time, exactly as it did.
+ * ------------------------------------------------------------------------*/
+
 /* -- q8 dot, two blocks at a time ------------------------------------------
  *
  * Two blocks are 64 bytes, which is one 512 bit register, and `vpdpbusd`
@@ -1325,63 +1343,119 @@ static inline IllQAcc ill_q8_step(IllQAcc acc, const int8_t *w, const int8_t *a,
     defined(__AVX512F__) && !defined(ILL_NO_SIMD)
 #define ILL_Q8_PAIR 1
 #define ILL_Q4_WIDE 1
+
+typedef __m512 IllQScale;
+
+/* Two consecutive scales, eight lanes each, straight out of memory. */
+static inline IllQScale ill_q8_scale_wide(const float *pair)
+{
+    const __m512i idx = _mm512_setr_epi32(0, 0, 0, 0, 0, 0, 0, 0,
+                                          1, 1, 1, 1, 1, 1, 1, 1);
+    __m128 two = _mm_castsi128_ps(_mm_loadl_epi64((const __m128i *)pair));
+    return _mm512_permutexvar_ps(idx, _mm512_castps128_ps512(two));
+}
+
+/* The weight side already widened, times the activation side of a tile. */
+static inline IllQScale ill_q8_scale_fuse(IllQScale sheet, const float *pair)
+{
+    return _mm512_mul_ps(sheet, ill_q8_scale_wide(pair));
+}
+
 /* The dot over two blocks whose sixty-four weights are already in a register.
  * q8 loads them; q4 unpacks them, and unpacking straight into a register is
  * the difference between the format paying and not -- lifted through a
  * sixty-four byte buffer instead, the store and the reload cost more than the
  * halved weight read saves. */
 static inline IllQAcc ill_q8_pair_wide(IllQAcc acc, __m512i wv, const int8_t *a,
-                                       float lo, float hi)
+                                       IllQScale sv)
 {
     __m512i av  = _mm512_loadu_si512((const void *)a);
     __mmask64 neg = _mm512_movepi8_mask(wv);               /* where w is negative */
     __m512i mag = _mm512_abs_epi8(wv);                     /* |w|, read unsigned  */
     __m512i sgn = _mm512_mask_sub_epi8(av, neg, _mm512_setzero_si512(), av);
     __m512i tot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), mag, sgn);
-    __m512  sv  = _mm512_insertf32x8(_mm512_castps256_ps512(_mm256_set1_ps(lo)),
-                                     _mm256_set1_ps(hi), 1);
     return _mm512_fmadd_ps(_mm512_cvtepi32_ps(tot), sv, acc);
 }
 
 static inline IllQAcc ill_q8_pair(IllQAcc acc, const int8_t *w, const int8_t *a,
-                                  float lo, float hi)
+                                  IllQScale sv)
 {
-    return ill_q8_pair_wide(acc, _mm512_loadu_si512((const void *)w), a, lo, hi);
+    return ill_q8_pair_wide(acc, _mm512_loadu_si512((const void *)w), a, sv);
 }
 #endif
 
 #if !defined(ILL_Q8_PAIR)
-static inline IllQAcc ill_q8_pair(IllQAcc acc, const int8_t *w, const int8_t *a,
-                                  float lo, float hi)
+typedef struct IllQScale { float lo, hi; } IllQScale;
+
+static inline IllQScale ill_q8_scale_wide(const float *pair)
 {
-    acc = ill_q8_step(acc, w, a, lo);
-    return ill_q8_step(acc, w + ILL_Q8_BLOCK, a + ILL_Q8_BLOCK, hi);
+    IllQScale sv;
+    sv.lo = pair[0];
+    sv.hi = pair[1];
+    return sv;
+}
+
+static inline IllQScale ill_q8_scale_fuse(IllQScale sheet, const float *pair)
+{
+    IllQScale sv;
+    sv.lo = sheet.lo * pair[0];
+    sv.hi = sheet.hi * pair[1];
+    return sv;
+}
+
+static inline IllQAcc ill_q8_pair(IllQAcc acc, const int8_t *w, const int8_t *a,
+                                  IllQScale sv)
+{
+    acc = ill_q8_step(acc, w, a, sv.lo);
+    return ill_q8_step(acc, w + ILL_Q8_BLOCK, a + ILL_Q8_BLOCK, sv.hi);
 }
 #endif
 
 #if defined(ILL_Q4_WIDE)
 typedef __m512i IllQNib;
 
-/* Two packed blocks -- thirty-two bytes -- lifted into sixty-four signed
- * weights without touching memory.  The low nibbles of a block hold its first
- * sixteen values and the high nibbles its last sixteen, so the two halves of
- * each block have to be interleaved back at 128 bit granularity, which is what
- * the qword permute does. */
+/* Two packed blocks -- thirty-two bytes -- lifted into sixty-four weights
+ * without touching memory.  The low nibbles of a block hold its first sixteen
+ * values and the high nibbles its last sixteen, so the two halves of each
+ * block have to be interleaved back at 128 bit granularity, which is what the
+ * qword permute does.
+ *
+ * What comes out is the stored code, 0..15, and not the weight it stands for,
+ * which is the code less eight.  That is deliberate: `vpdpbusd` wants its left
+ * operand unsigned and a nibble already is one, so the subtraction that would
+ * make it signed -- and the three operations the q8 path then spends moving
+ * that sign onto the activations -- are all paid for by one correction in the
+ * dot, where the eight comes back out against the activations directly. */
 static inline IllQNib ill_q4_open(const uint8_t *packed)
 {
     __m256i raw = _mm256_loadu_si256((const __m256i *)packed);
     __m256i lo  = _mm256_and_si256(raw, _mm256_set1_epi8(0x0F));
     __m256i hi  = _mm256_and_si256(_mm256_srli_epi16(raw, 4), _mm256_set1_epi8(0x0F));
     __m512i idx = _mm512_setr_epi64(0, 1, 8, 9, 2, 3, 10, 11);
-    __m512i nib = _mm512_permutex2var_epi64(_mm512_castsi256_si512(lo), idx,
-                                            _mm512_castsi256_si512(hi));
-    return _mm512_sub_epi8(nib, _mm512_set1_epi8(8));
+    return _mm512_permutex2var_epi64(_mm512_castsi256_si512(lo), idx,
+                                     _mm512_castsi256_si512(hi));
 }
 
+/* The q4 dot, on the codes rather than on the weights.
+ *
+ * A block's weight is `n - 8` for a code `n` in 0..15, so over any four bytes
+ * `sum (n - 8) a` is `sum n a` minus `8 sum a`, and both halves are one
+ * `vpdpbusd`: the first against the codes, the second against a constant eight,
+ * which is what an unsigned left operand is for.  Each of the sixteen lanes
+ * covers four bytes, so the largest total in play is 4 * 15 * 127 and the
+ * largest correction 4 * 8 * 127; neither comes near an int32 and the
+ * difference is the same integer the signed form produced.  The answer is
+ * therefore bit for bit what it was, and the row costs three operations here
+ * where it cost four, with the subtract that centred the codes gone from the
+ * unpack as well. */
 static inline IllQAcc ill_q4_dot(IllQAcc acc, IllQNib w, const int8_t *a,
-                                 float lo, float hi)
+                                 IllQScale sv)
 {
-    return ill_q8_pair_wide(acc, w, a, lo, hi);
+    __m512i av  = _mm512_loadu_si512((const void *)a);
+    __m512i tot = _mm512_dpbusd_epi32(_mm512_setzero_si512(), w, av);
+    __m512i off = _mm512_dpbusd_epi32(_mm512_setzero_si512(),
+                                      _mm512_set1_epi8(8), av);
+    return _mm512_fmadd_ps(_mm512_cvtepi32_ps(_mm512_sub_epi32(tot, off)), sv, acc);
 }
 #else
 /* Everywhere else the lift goes through a buffer and the q8 pair reads it. */
@@ -1396,9 +1470,9 @@ static inline IllQNib ill_q4_open(const uint8_t *packed)
 }
 
 static inline IllQAcc ill_q4_dot(IllQAcc acc, IllQNib w, const int8_t *a,
-                                 float lo, float hi)
+                                 IllQScale sv)
 {
-    return ill_q8_pair(acc, w.cell, a, lo, hi);
+    return ill_q8_pair(acc, w.cell, a, sv);
 }
 #endif
 
@@ -2046,6 +2120,33 @@ typedef struct IllPlane {
 
 #define ILL_TILE_MAX 8
 
+/* -- reaching for the next panel ------------------------------------------
+ *
+ * Decode streams a whole weight plane once a token along a stride the loop
+ * knows and the hardware has to guess at, and a core waiting on that stride is
+ * a core doing nothing.  One prefetch a cache line, issued far enough ahead
+ * that the line has arrived by the time the dot wants it, costs one
+ * instruction and is the only thing left in this kernel that the memory system
+ * can be told rather than shown.
+ *
+ * The distance is in bytes of the plane's own storage and is deliberately more
+ * than a row of most shapes: the rows are contiguous, so running off the end of
+ * one reaches into the next, which is exactly what a row-major sweep wants.
+ * Running off the end of the plane entirely is safe -- a prefetch of an address
+ * that is not mapped is architecturally a no-op, not a fault -- so the loops do
+ * not test for it, which is the whole point of the instruction being free.
+ * ------------------------------------------------------------------------*/
+
+#define ILL_AHEAD_BYTES 1024
+
+#if defined(__GNUC__) || defined(__clang__)
+#  define ILL_AHEAD(at) __builtin_prefetch((const void *)(at), 0, 3)
+#elif defined(_MSC_VER) && defined(ILL_ARCH_X86) && !defined(ILL_NO_SIMD)
+#  define ILL_AHEAD(at) _mm_prefetch((const char *)(at), _MM_HINT_T0)
+#else
+#  define ILL_AHEAD(at) ((void)0)
+#endif
+
 #define ILL_DENSE_BODY(N, LOADW, CTYPE, CASTW)                                        \
     do {                                                                              \
         int32_t r;                                                                    \
@@ -2057,6 +2158,7 @@ typedef struct IllPlane {
             for (t = 0; t < N; ++t) acc[t] = ill_vec_zero();                          \
             for (j = 0; j + ILL_VW <= cols; j += ILL_VW) {                            \
                 IllVec wv = LOADW(w + j);                                             \
+                ILL_AHEAD((const char *)(w + j) + ILL_AHEAD_BYTES);                   \
                 for (t = 0; t < N; ++t)                                               \
                     acc[t] = ill_vec_fma(wv, ill_vec_load(x + (size_t)t * xstep + j), \
                                          acc[t]);                                     \
@@ -2111,11 +2213,13 @@ static void ill_dense_real(const IllPlane *plane, const float *x, size_t xstep,
             for (t = 0; t < N; ++t) acc[t] = ill_q8_zero();                           \
             for (b = 0; b + 2 <= full; b += 2) {                                      \
                 const int8_t *wb = w + (size_t)b * ILL_Q8_BLOCK;                      \
+                IllQScale sheet = ill_q8_scale_wide(ws + b);                          \
+                ILL_AHEAD(wb + ILL_AHEAD_BYTES);                                      \
                 for (t = 0; t < N; ++t)                                               \
                     acc[t] = ill_q8_pair(acc[t],                                      \
                                 wb, xq + (size_t)t * qstep + (size_t)b * ILL_Q8_BLOCK, \
-                                ws[b] * xs[(size_t)t * sstep + b],                    \
-                                ws[b + 1] * xs[(size_t)t * sstep + b + 1]);           \
+                                ill_q8_scale_fuse(sheet,                              \
+                                    xs + (size_t)t * sstep + b));                     \
             }                                                                         \
             for (; b < full; ++b) {                                                   \
                 const int8_t *wb = w + (size_t)b * ILL_Q8_BLOCK;                      \
@@ -2179,12 +2283,14 @@ static void ill_dense_byte(const IllPlane *plane, const int8_t *xq, size_t qstep
             int32_t t, b;                                                             \
             for (t = 0; t < N; ++t) acc[t] = ill_q8_zero();                           \
             for (b = 0; b + 2 <= full; b += 2) {                                      \
-                IllQNib wide = ill_q4_open(w + (size_t)b * ILL_Q4_BYTES);             \
+                IllQNib   wide  = ill_q4_open(w + (size_t)b * ILL_Q4_BYTES);          \
+                IllQScale sheet = ill_q8_scale_wide(ws + b);                          \
+                ILL_AHEAD(w + (size_t)b * ILL_Q4_BYTES + ILL_AHEAD_BYTES);            \
                 for (t = 0; t < N; ++t)                                               \
                     acc[t] = ill_q4_dot(acc[t], wide,                                 \
                                 xq + (size_t)t * qstep + (size_t)b * ILL_Q8_BLOCK,    \
-                                ws[b] * xs[(size_t)t * sstep + b],                    \
-                                ws[b + 1] * xs[(size_t)t * sstep + b + 1]);           \
+                                ill_q8_scale_fuse(sheet,                              \
+                                    xs + (size_t)t * sstep + b));                     \
             }                                                                         \
             for (; b < full; ++b) {                                                   \
                 ill_q4_lift(w + (size_t)b * ILL_Q4_BYTES, lift);                      \
@@ -3711,6 +3817,7 @@ typedef struct IllPiece {
     int32_t     span;
     uint8_t     special;
 } IllPiece;
+
 
 typedef enum IllSplit { ILL_SPLIT_GPT2 = 0, ILL_SPLIT_LLAMA3 } IllSplit;
 typedef enum IllChat  { ILL_CHAT_PLAIN = 0, ILL_CHAT_ML } IllChat;

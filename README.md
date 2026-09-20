@@ -23,7 +23,10 @@ python3 util/make.py build                             # a few seconds, no depen
 ```
 
 Add `--quant q8` to halve the memory and roughly double decode speed, or
-`--quant q4` to halve it again — 1.57 GiB for the 2.6B, and 1.23x q8's decode.
+`--quant q4` to halve it again — 1.57 GiB for the 2.6B, and faster than q8 at
+decode for it; the last figure taken on the published weights was 1.23x, before
+1.9.0 took three instructions a block pair out of the q4 dot, and a stand-in on
+another host puts it at 1.60x after.
 Read what q4 costs before choosing it: on ordinary prose, nothing a perplexity
 can see; on text the model should find easy, most of its confidence. Add
 `--draft 4` to greedy decoding to verify four context-drafted tokens in each
@@ -189,7 +192,9 @@ UndefinedBehaviorSanitizer.
 The published `LiquidAI/LFM2.5-2.6B` checkpoint — 30 layers, 8 attention and 22
 convolution, model dim 2048, feed forward 10752, 32 query heads over 8
 key-value heads, vocabulary 128000 — on four x86-64 cores at 2.80 GHz with
-AVX-512 and VNNI, at q8:
+AVX-512 and VNNI. **These are 1.6.0's numbers and are not re-taken**: 1.9.0
+made the quantised dot faster and there is no host here with those weights on
+it, so read them as a floor rather than as the rate:
 
 |         | weights  | prefill, 256 tok | decode     |
 | ------- | -------- | ---------------- | ---------- |
@@ -215,6 +220,23 @@ AVX-512 host, before the paired dot:
 Decode scaled 2.4 → 4.6 → 8.9 tok/s across one, two, and four threads there.
 Loading bf16 costs about a tenth of a second because the weights are memory
 mapped and never copied; repacking to q8 costs a few seconds once.
+
+What 1.9.0 did to the kernel, on a synthetic checkpoint of LFM2 proportions —
+dim 1536, 16 layers, 6 attention and 10 convolution, feed forward 3072 — on
+four cores at 2.80 GHz with AVX-512 and VNNI whose bare sweep is 13.6 / 26.3 /
+51.2 GB/s at one, two and four threads, as the best of three runs alternating
+between the two builds:
+
+|      | weights  | prefill, 256 tok    | decode              |
+| ---- | -------- | ------------------- | ------------------- |
+| bf16 | 0.68 GiB | 295.3 → 302.7 tok/s | 54.3 → 60.2 tok/s   |
+| q8   | 0.38 GiB | 325.6 → 394.9 tok/s | 64.7 → 75.2 tok/s   |
+| q4   | 0.21 GiB | 310.7 → 348.6 tok/s | 94.2 → 120.2 tok/s  |
+
+Decode there reads its weights at 86% of that host's sweep in bf16, 60% at q8
+and 53% at q4 — the narrower the format, the further it still is from the
+memory ceiling, because a narrow format puts arithmetic between the read and
+the answer.
 
 ### ➖ Pictures, against ultralytics
 

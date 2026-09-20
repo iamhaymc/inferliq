@@ -497,9 +497,12 @@ static void test_kernels(void)
                             two + ILL_Q4_BYTES, &steps[1]);
                 ill_q4_lift(two, flat);
                 ill_q4_lift(two + ILL_Q4_BYTES, flat + ILL_Q8_BLOCK);
-                a  = ill_q8_fold(ill_q8_pair(ill_q8_zero(), flat, act, 0.5f, 0.25f));
-                b2 = ill_q8_fold(ill_q4_dot(ill_q8_zero(), ill_q4_open(two),
-                                            act, 0.5f, 0.25f));
+                {   float mix[2] = { 0.5f, 0.25f };
+                    IllQScale sv = ill_q8_scale_wide(mix);
+                    a  = ill_q8_fold(ill_q8_pair(ill_q8_zero(), flat, act, sv));
+                    b2 = ill_q8_fold(ill_q4_dot(ill_q8_zero(), ill_q4_open(two),
+                                                act, sv));
+                }
                 test_case("the register lift agrees with the byte lift",
                           test_near(a, b2, 1e-3f), "%.4f vs %.4f",
                           (double)a, (double)b2);
@@ -513,10 +516,10 @@ static void test_kernels(void)
                weights unsigned, so this is the check that the sign moved onto
                the activations correctly; everywhere else it is the identity. */
             IllQAcc one = ill_q8_zero(), two = ill_q8_zero();
-            float lo = 0.5f, hi = 0.25f, a, b;
-            one = ill_q8_step(one, wq, xq, lo);
-            one = ill_q8_step(one, wq + ILL_Q8_BLOCK, xq + ILL_Q8_BLOCK, hi);
-            two = ill_q8_pair(two, wq, xq, lo, hi);
+            float mix[2] = { 0.5f, 0.25f }, a, b;
+            one = ill_q8_step(one, wq, xq, mix[0]);
+            one = ill_q8_step(one, wq + ILL_Q8_BLOCK, xq + ILL_Q8_BLOCK, mix[1]);
+            two = ill_q8_pair(two, wq, xq, ill_q8_scale_wide(mix));
             a = ill_q8_fold(one); b = ill_q8_fold(two);
             test_case("q8 paired dot equals two single dots",
                       test_near(a, b, 1e-3f), "%.6f vs %.6f", (double)a, (double)b);
@@ -527,7 +530,7 @@ static void test_kernels(void)
                makes it work, so say so here rather than trusting it. */
             int8_t wedge[2 * ILL_Q8_BLOCK], edge[2 * ILL_Q8_BLOCK];
             IllQAcc one = ill_q8_zero(), two = ill_q8_zero();
-            float a, b;
+            float unit[2] = { 1.0f, 1.0f }, a, b;
             int32_t k;
             for (k = 0; k < 2 * ILL_Q8_BLOCK; ++k) {
                 wedge[k] = (int8_t)(k % 3 == 0 ? -128 : (k % 5) - 2);
@@ -535,10 +538,68 @@ static void test_kernels(void)
             }
             one = ill_q8_step(one, wedge, edge, 1.0f);
             one = ill_q8_step(one, wedge + ILL_Q8_BLOCK, edge + ILL_Q8_BLOCK, 1.0f);
-            two = ill_q8_pair(two, wedge, edge, 1.0f, 1.0f);
+            two = ill_q8_pair(two, wedge, edge, ill_q8_scale_wide(unit));
             a = ill_q8_fold(one); b = ill_q8_fold(two);
             test_case("q8 paired dot handles a -128 weight",
                       test_near(a, b, 1e-3f), "%.1f vs %.1f", (double)a, (double)b);
+        }
+
+        {   /* The two block scales reach the dot as one value, built from the
+               weight side once and the activation side per row.  The check is
+               that the pairing survives that: the low block must still meet
+               its own scale and the high block its own, which a fuse that
+               crossed the halves would fail. */
+            float   sheet[2] = { 0.5f, 0.25f }, act[2] = { 3.0f, -7.0f };
+            IllQAcc one = ill_q8_zero(), two = ill_q8_zero();
+            float   a, b;
+            one = ill_q8_step(one, wq, xq, sheet[0] * act[0]);
+            one = ill_q8_step(one, wq + ILL_Q8_BLOCK, xq + ILL_Q8_BLOCK,
+                              sheet[1] * act[1]);
+            two = ill_q8_pair(two, wq, xq,
+                              ill_q8_scale_fuse(ill_q8_scale_wide(sheet), act));
+            a = ill_q8_fold(one); b = ill_q8_fold(two);
+            test_case("the paired dot keeps each block with its own scale",
+                      test_near(a, b, 1e-3f), "%.4f vs %.4f", (double)a, (double)b);
+        }
+
+        {   /* The q4 dot reads the stored code, 0..15, and takes the eight
+               back out against the activations rather than out of the weights,
+               so the correction is arithmetic the test has to pin down: the
+               answer must be the exact integer dot of the lifted bytes.  A
+               fixture that reaches both ends of the range is the point --
+               a block whose codes are all eight would pass with no correction
+               at all. */
+            float   cell[2 * ILL_Q8_BLOCK], steps[2];
+            uint8_t two[2 * ILL_Q4_BYTES];
+            int8_t  flat[2 * ILL_Q8_BLOCK], act[2 * ILL_Q8_BLOCK];
+            float   want, got;
+            int32_t j2, tot = 0;
+            for (j2 = 0; j2 < 2 * ILL_Q8_BLOCK; ++j2) {
+                cell[j2] = (float)(j2 % 16) - 8.0f;      /* every code, in turn */
+                act[j2]  = (int8_t)(((j2 * 31) % 255) - 127);
+            }
+            cell[7]  = -16.0f;                            /* the extreme, on -8 */
+            cell[39] = -16.0f;
+            ill_q4_pack(cell, ILL_Q8_BLOCK, two, &steps[0]);
+            ill_q4_pack(cell + ILL_Q8_BLOCK, ILL_Q8_BLOCK,
+                        two + ILL_Q4_BYTES, &steps[1]);
+            ill_q4_lift(two, flat);
+            ill_q4_lift(two + ILL_Q4_BYTES, flat + ILL_Q8_BLOCK);
+            for (j2 = 0; j2 < ILL_Q8_BLOCK; ++j2)
+                tot += (int32_t)flat[j2] * (int32_t)act[j2];
+            want = (float)tot;
+            tot = 0;
+            for (j2 = 0; j2 < ILL_Q8_BLOCK; ++j2)
+                tot += (int32_t)flat[ILL_Q8_BLOCK + j2] *
+                       (int32_t)act[ILL_Q8_BLOCK + j2];
+            want += (float)tot;
+            {   float unit[2] = { 1.0f, 1.0f };
+                got = ill_q8_fold(ill_q4_dot(ill_q8_zero(), ill_q4_open(two), act,
+                                             ill_q8_scale_wide(unit)));
+            }
+            test_case("the q4 dot is the integer dot of the codes it stands for",
+                      test_near(want, got, 1e-2f), "%.1f vs %.1f",
+                      (double)want, (double)got);
         }
 
         {
