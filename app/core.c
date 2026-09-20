@@ -3818,6 +3818,30 @@ typedef struct IllPiece {
     uint8_t     special;
 } IllPiece;
 
+/* One byte of the added-token trie.
+ *
+ * The added tokens are matched literally, before any splitting, at every
+ * position of the input.  Walking the list at each position is linear in the
+ * number of added tokens, and the published checkpoint has 124 of them, so an
+ * ordinary prompt pays a hundred and twenty-four length checks and compares a
+ * byte -- for text that contains none of them, which is almost all text.
+ *
+ * A trie over the same set turns that into one indexed read a byte: the first
+ * byte picks a root out of a 256 entry table, and a position whose byte starts
+ * no added token is rejected there without touching the list at all.  Below
+ * the root the children of a node are a linked list, walked by byte, because
+ * the depth reached is one or two for anything that is not a real match.
+ *
+ * `mark` is the token that ends here, or -1.  The tokens are inserted longest
+ * first and a mark is only written once, so where two added tokens carry the
+ * same text the one the old list would have found first is still the one
+ * found. */
+typedef struct IllTwig {
+    int32_t down;   /* first child, -1 for a leaf                            */
+    int32_t next;   /* next sibling of this node, -1 at the end              */
+    int32_t mark;   /* token ending at this node, -1 where none does         */
+    uint8_t byte;
+} IllTwig;
 
 typedef enum IllSplit { ILL_SPLIT_GPT2 = 0, ILL_SPLIT_LLAMA3 } IllSplit;
 typedef enum IllChat  { ILL_CHAT_PLAIN = 0, ILL_CHAT_ML } IllChat;
@@ -3839,6 +3863,9 @@ struct IllVocab {
 
     int32_t  *extra;       /* ids of added tokens, longest content first     */
     int32_t   extra_count;
+    IllTwig  *twigs;       /* the same set as a trie, one walk a position    */
+    int32_t   twig_count;
+    int32_t   twig_head[256];
 
     int32_t   begin_token, end_token, pad_token;
     int32_t   stops[8];
@@ -3879,6 +3906,78 @@ static void ill_vocab_free(IllVocab *vocab)
     for (index = 0; index < vocab->owned_count; ++index) ill_block_free(vocab->owned[index]);
     ill_block_free(vocab->owned);
     ill_block_free(vocab);
+}
+
+/* Builds the added-token trie from the list, which must already be in its
+ * longest-first order.  One node a byte of content is the exact bound, since
+ * the trie shares prefixes and never holds more nodes than the bytes put into
+ * it, and the first byte of every token lives in the head table rather than in
+ * a node of its own -- which costs a node each and is what makes the common
+ * rejection a single indexed read. */
+static IllResult ill_vocab_twine(IllVocab *vocab)
+{
+    size_t  total = 0;
+    int32_t index, depth;
+
+    for (index = 0; index < 256; ++index) vocab->twig_head[index] = -1;
+    vocab->twig_count = 0;
+    for (index = 0; index < vocab->extra_count; ++index) {
+        int32_t span = vocab->pieces[vocab->extra[index]].span;
+        if (span > 0) total += (size_t)span;
+    }
+    if (total == 0) return ILL_OK;
+
+    vocab->twigs = (IllTwig *)ill_vocab_own(vocab, total * sizeof(IllTwig));
+    if (!vocab->twigs) return ILL_ALLOC;
+
+    for (index = 0; index < vocab->extra_count; ++index) {
+        const IllPiece *piece = &vocab->pieces[vocab->extra[index]];
+        int32_t         node  = -1;
+        if (piece->span <= 0) continue;
+        for (depth = 0; depth < piece->span; ++depth) {
+            uint8_t  byte = (uint8_t)piece->text[depth];
+            int32_t *head = depth == 0 ? &vocab->twig_head[byte]
+                                       : &vocab->twigs[node].down;
+            int32_t  walk = *head;
+            while (walk >= 0 && vocab->twigs[walk].byte != byte)
+                walk = vocab->twigs[walk].next;
+            if (walk < 0) {
+                walk = vocab->twig_count++;
+                vocab->twigs[walk].down = -1;
+                vocab->twigs[walk].next = *head;
+                vocab->twigs[walk].mark = -1;
+                vocab->twigs[walk].byte = byte;
+                *head = walk;
+            }
+            node = walk;
+        }
+        if (vocab->twigs[node].mark < 0) vocab->twigs[node].mark = vocab->extra[index];
+    }
+    return ILL_OK;
+}
+
+/* The longest added token starting at `at`, or -1 where none does.  Longest
+ * rather than first, which is the same answer the list gave: it was sorted by
+ * length and the first match won. */
+static int32_t ill_vocab_reach(const IllVocab *vocab, const char *text,
+                               int32_t span, int32_t at, int32_t *took)
+{
+    int32_t node  = vocab->twig_head[(uint8_t)text[at]];
+    int32_t depth = 1, hit = -1;
+
+    *took = 0;
+    while (node >= 0) {
+        const IllTwig *twig = &vocab->twigs[node];
+        if (twig->mark >= 0) { hit = twig->mark; *took = depth; }
+        if (at + depth >= span) break;
+        {   uint8_t want = (uint8_t)text[at + depth];
+            node = twig->down;
+            while (node >= 0 && vocab->twigs[node].byte != want)
+                node = vocab->twigs[node].next;
+        }
+        ++depth;
+    }
+    return hit;
 }
 
 /* -- utf-8 and the byte alphabet ------------------------------------------ */
@@ -4268,6 +4367,9 @@ static IllResult ill_vocab_read(IllVocab *vocab, const IllJson *doc, const IllAr
                 vocab->extra[b - 1] = vocab->extra[b];
                 vocab->extra[b] = swap;
             }
+        {   IllResult made = ill_vocab_twine(vocab);
+            if (made != ILL_OK) return made;
+        }
     }
 
     /* merges */
@@ -4737,15 +4839,9 @@ IllResult ill_vocab_encode(const IllVocab *vocab, const char *text, size_t text_
     if (!weld.syms || !weld.heap) { code = ILL_ALLOC; goto done; }
 
     while (pos < span) {
-        int32_t hit = -1, hit_span = 0, index;
-        for (index = 0; index < vocab->extra_count; ++index) {
-            int32_t id   = vocab->extra[index];
-            int32_t want = vocab->pieces[id].span;
-            if (want <= 0 || pos + want > span) continue;
-            if (!memcmp(text + pos, vocab->pieces[id].text, (size_t)want)) {
-                hit = id; hit_span = want; break;   /* extras are longest first */
-            }
-        }
+        int32_t hit_span = 0;
+        int32_t hit = vocab->twigs ? ill_vocab_reach(vocab, text, span, pos, &hit_span)
+                                   : -1;
         if (hit < 0) { ++pos; continue; }
         if (pos > seg) ill_vocab_slice(vocab, &weld, &quill, text + seg, pos - seg);
         ill_quill_put(&quill, hit);

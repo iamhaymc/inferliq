@@ -427,6 +427,11 @@ inner loop never touches a string — it walks ids.
 Encoding runs in four stages:
 
 1. **added tokens** — matched literally, longest first, splitting the input.
+   The set is a byte trie whose first byte is a 256-entry head table, so a
+   position that starts no added token is rejected by one indexed read; below
+   the head a node's children are a linked list, because the depth reached is
+   one or two for anything that is not a real match. `ill_vocab_twine` builds
+   it at load and `ill_vocab_reach` walks it.
 2. **pre-tokenization** — the GPT-2 or Llama-3 alternation, transcribed in
    order rather than run through a regex engine. Which one is detected from the
    `Split` pattern in `tokenizer.json`.

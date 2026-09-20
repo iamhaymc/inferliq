@@ -904,6 +904,53 @@ static void test_vocab(void)
         ill_block_free(weld.heap);
     }
 
+    {   /* The added-token trie stands in for a list walked at every input
+           position, so what it has to reproduce is that list's answer: the
+           longest added token starting here, nothing where none starts, and
+           never a token that would run off the end of the text. */
+        static const char *words[] = { "<|im_start|>", "<|im_end|>", "abc", "ab" };
+        IllPiece  bits[4];
+        int32_t   ids[4] = { 0, 1, 2, 3 };
+        IllVocab *v = (IllVocab *)ill_block_zero(sizeof(IllVocab));
+        int32_t   index, took = -1;
+        if (v) {
+            for (index = 0; index < 4; ++index) {
+                bits[index].text = words[index];
+                bits[index].span = (int32_t)strlen(words[index]);
+                bits[index].special = 1;
+            }
+            v->pieces = bits;
+            v->count = 4;
+            v->extra = ids;
+            v->extra_count = 4;
+            test_case("the added-token trie builds",
+                      ill_vocab_twine(v) == ILL_OK && v->twigs != NULL, "");
+            test_case("the trie finds the longest token starting here",
+                      ill_vocab_reach(v, "xabcy", 5, 1, &took) == 2 && took == 3,
+                      "took %d", (int)took);
+            test_case("the trie falls back to the shorter token",
+                      ill_vocab_reach(v, "xaby", 4, 1, &took) == 3 && took == 2,
+                      "took %d", (int)took);
+            test_case("the trie answers nothing where nothing starts",
+                      ill_vocab_reach(v, "xaby", 4, 0, &took) < 0 && took == 0, "");
+            test_case("the trie refuses a token the text only begins",
+                      ill_vocab_reach(v, "<|im_sta", 8, 0, &took) < 0 && took == 0, "");
+            {   /* The bytes after the span are real and would complete a
+                   longer token, which is what makes this a bound rather than
+                   a formality: the answer must be the token that fits. */
+                char run[4];
+                run[0] = 'a'; run[1] = 'b'; run[2] = 'c'; run[3] = '!';
+                test_case("the trie stops at the end of the text it was given",
+                          ill_vocab_reach(v, run, 2, 0, &took) == 3 && took == 2,
+                          "took %d", (int)took);
+            }
+            test_case("the trie keeps a token that is another's prefix",
+                      ill_vocab_reach(v, "<|im_end|>", 10, 0, &took) == 1 && took == 10,
+                      "took %d", (int)took);
+            ill_vocab_free(v);
+        }
+    }
+
     {
         test_case("hash is stable for equal text",
                   ill_hash_text("attention", 9) == ill_hash_text("attention", 9), "");

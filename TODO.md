@@ -142,23 +142,19 @@ room. Everything below that is coverage, reliability and reach.
     the placement wants is the split the pool already has.
     **Blocked** on a host with more than one node.
 
-18. **Speed the added-token scan.** It is linear in the number of added tokens
-    at every input position, and the published checkpoint has 124 of them. An
-    Aho-Corasick automaton makes it linear in the input instead.
-
-19. **Evaluate the Jinja `chat_template`** for the subset chat templates
+18. **Evaluate the Jinja `chat_template`** for the subset chat templates
     actually use, so prompt shaping comes from the checkpoint rather than from
     detecting `<|im_start|>` in the vocabulary. Detection is a guess that
     happens to be right on this family; a checkpoint that shapes turns
     differently would be shaped wrongly and produce plausible nonsense.
 
-20. **Replace the character-class range table with generated Unicode property
+19. **Replace the character-class range table with generated Unicode property
     tables.** Runes below `0x80` follow the exact ASCII rule; above it a rune is
     a letter unless it falls in a listed range, and the ranges cover ordinary
     prose rather than every script. A checkpoint tokenised in a script outside
     them splits differently to the reference.
 
-21. **Unigram and WordPiece tokenizer models, and the Metaspace pre-tokenizer.**
+20. **Unigram and WordPiece tokenizer models, and the Metaspace pre-tokenizer.**
     Reported as `ILL_VOCAB` rather than approximated, which is the right
     refusal and still a refusal.
 

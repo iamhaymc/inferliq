@@ -1569,3 +1569,86 @@ comparisons skip and the registry checks still run.
 
 **177 pass**, 175 before.
 
+---
+
+## 1.9.1 — the added tokens become a trie
+
+Added tokens are matched literally, at every byte of the input, before any
+splitting. The match was a walk of the whole list at every position: for each
+of the added tokens, a length check and a `memcmp`. The published checkpoint
+carries 124 of them, so an ordinary prompt paid a hundred and twenty-four
+compares a byte for text that contains none of them, which is almost all text.
+
+### What it took
+
+A byte trie over the same set, built once at load from the list the loader has
+already sorted longest first. The first byte of a token lives in a 256 entry
+head table rather than in a node of its own, so a position whose byte starts no
+added token is rejected by one indexed read and never touches the list at all.
+Below the head the children of a node are a linked list walked by byte, because
+the depth reached is one or two for anything that is not a real match.
+
+The bound on the node count is exactly the number of content bytes, since a
+trie shares prefixes and can never hold more nodes than the bytes put into it —
+124 added tokens of about thirty bytes each is under four thousand nodes and
+about sixty kilobytes, once, at load.
+
+The walk answers the **longest** token starting here, which is the answer the
+list gave: it was sorted by length and the first match won. Where two added
+tokens carry the same text the mark is written once, by the one the list would
+have found first, so that case does not move either.
+
+The suffix links an Aho-Corasick automaton would add are deliberately not here.
+They buy the worst case — text that repeatedly begins a long added token
+without finishing it — and cost a goto table of a couple of megabytes or a
+second set of links through every node. What they do not buy is the case that
+actually happens, where the head table has already answered in one read. If a
+checkpoint ever turns up whose added tokens make the walk deep on real text,
+the links go on top of this trie rather than instead of it.
+
+### What it is worth
+
+On `xeon-2.8b`, one thread. The scan alone over 64 KiB of text against a
+124-token stand-in shaped like the published set, best of twenty runs:
+**22.792 ms to 0.083 ms, 275x**. End to end, 100 kB of prose through
+`app_main tokens` against a synthetic checkpoint, where the load is under a
+hundredth of a second and the rest is the merge: **0.09 s to 0.02 s**. What is
+left is the byte-pair merging, which this version does not touch.
+
+### That it is the same answer
+
+`tokens` over a prompt carrying added tokens gives identical ids to a binary
+built from the previous commit, and the twelve `logits` and `generate`
+comparisons of 1.9.0 were taken through the same encoder.
+
+### Code
+
+`app/core.c` part 13: `IllTwig`, the three fields `twigs`, `twig_count` and
+`twig_head` on `IllVocab`, `ill_vocab_twine` to build and `ill_vocab_reach` to
+walk, a call to the builder where the list is sorted, and the scan in
+`ill_vocab_encode` reduced to one call. The storage goes through
+`ill_vocab_own`, so it is freed with the rest of the vocabulary and there is no
+new lifetime to get wrong.
+
+The walk is a function rather than the body of the loop so that it can be
+tested without a checkpoint, which is the only reason it is not inline.
+
+### Tests
+
+Seven checks, over a hand-built vocabulary of four added tokens where two share
+a prefix and two are wholly unrelated: that the trie builds; that it finds the
+longest token starting here rather than the first; that it falls back to the
+shorter one where the longer does not match; that it answers nothing where
+nothing starts; that it refuses a token the text only begins; that a token
+which is another's prefix is still found; and that it stops at the end of the
+text it was given.
+
+The last one is a bound rather than a formality, and had to be written twice to
+bite. Read through a string literal, the byte past the end is the terminator
+and matches no child, so dropping the bound changes nothing. Given a buffer
+whose next bytes are real and would complete a longer token, dropping the bound
+returns that longer token: the check now hands it `abc` with a span of two and
+requires the answer to be `ab`. Stopping the walk at the first mark instead of
+the deepest fails one check.
+
+**184 pass**, 177 before.
