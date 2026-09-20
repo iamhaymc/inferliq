@@ -18,7 +18,15 @@ better than the machine can fetch.
 | host | cores | vector | bare sweep, 1 / 2 / 4 threads |
 | --- | --- | --- | --- |
 | `xeon-2.8` — Intel Xeon @ 2.80 GHz, virtual | 4 | AVX-512 with VNNI | 11.0 / 19.1 / 36.6 GB/s |
+| `xeon-2.8b` — Intel Xeon @ 2.80 GHz, virtual | 4 | AVX-512 with VNNI | 13.6 / 26.3 / 51.2 GB/s |
 | `xeon-2.1` — Intel Xeon @ 2.10 GHz, virtual | 4 | AVX-512 | not taken |
+
+`xeon-2.8b` reports the same processor as `xeon-2.8` and is a different
+instance of it: same cores, same vector set, 33 MiB of L3, and a sweep a
+quarter faster. It is listed separately because a rate taken on one is not
+comparable with a rate taken on the other, and because the published checkpoint
+is not present on it — every number quoted against `xeon-2.8b` is against a
+synthetic stand-in, which the entry that quotes it names.
 
 `xeon-2.1` is where the Vulkan backend (1.8.0) was written, and its only Vulkan
 device is SwiftShader — a software rasterizer running SPIR-V on those same four
@@ -41,6 +49,14 @@ same host is 88 G multiply-adds a second. That is also why a narrower weight
 format helps decode and hurts prefill — q4 (1.6.0) is 1.23x on decode and
 0.93x on prefill, because unpacking is arithmetic and prefill has none to
 spare.
+
+Both of those figures are from 1.6.0 and have not been re-taken since.
+**1.9.0 moved the kernel under them**: on a synthetic stand-in on `xeon-2.8b`,
+q8 decode went from 52% of that host's sweep to 60% and q4 from 41% to 53%, so
+the 89% above is the q8 figure for a kernel the engine no longer has, and the
+q4-against-q8 ratio of 1.23x is a floor rather than the number. What either is
+on the published weights is unmeasured, because those weights are a Git LFS
+pointer in this tree.
 
 That ceiling is a ceiling on **reads**, not on tokens. `--draft` (1.5.0) gets
 more than one token out of a read by verifying proposals in the same pass, and
@@ -153,6 +169,17 @@ that the next person does not have the same idea twice.
   on about a tenth of the cells**, which carried to a hundredth of a logit at
   the head and a different score on a marginal detection. The engine is not
   trying to resize well; it is trying to resize the same.
+
+- **Banding a prefill's row range to fit L2** (1.9.0). A prefill re-reads the
+  weight plane once per group of eight activation rows, so cutting the row
+  range into bands and running every tile group against a band before moving on
+  ought to keep the reused half in cache. Over 4096 x 4096 with 64 tokens and
+  8192 x 2048 with 128, at bands of 128, 256, 512 and 1024 rows, it measured
+  **1.00x to 1.02x** — inside the noise. A tile of eight rows already reads
+  each weight byte eight times and a thread's quarter of the plane is the
+  working set, so the reuse the banding was meant to buy is there before it
+  starts. This says nothing about the packed panel layout of item 5, which
+  changes what a row read fetches rather than when it is read.
 
 - **Memoising the q8 activation pack** (1.2.0). Three planes in attention and
   two in the feed forward read the same normalised row, so the same bytes are
@@ -1376,3 +1403,252 @@ is exact for any pivot so long as the rescale uses the same one; it changes the
 numerical range and not the answer.
 
 **206 pass**, 175 before.
+
+---
+
+## 1.9.0 — the quantised dot stops paying for signs and scales
+
+Most of what the paired dot issued was not arithmetic. Every block pair spent
+three instructions moving the weights' sign onto the activations so that
+`vpdpbusd` could read the weights unsigned, and nine more building the two
+block scales into one register — four scalar loads, two multiplies, two
+broadcasts and an insert — to feed a single multiply-add. q4 paid a tenth on
+top: the unpack subtracted eight from every nibble to turn the stored code into
+the weight it stands for. Twenty-two operations went out per sixty-four q4
+weights and one of them was the dot, which is why `TODO.md` item 3 said q4
+decode was the first thing in this engine not waiting on memory.
+
+Nothing here is a new idea about arithmetic. It is the same integers reaching
+the same multiply-add through fewer instructions, plus the one thing a decode
+loop can tell the memory system rather than show it.
+
+### What it took
+
+**The q4 dot reads the code, not the weight.** A block's weight is `n - 8` for
+a stored code `n` in 0..15, so over any four bytes `sum (n - 8) a` is
+`sum n a` minus `8 sum a`. `vpdpbusd` wants its left operand unsigned and a
+nibble already is one, so the first half is the dot against the codes as they
+come out of the unpack and the second is the same instruction against a
+constant eight — an unsigned left operand is exactly what that constant is for.
+The unpack loses its `vpsubb`, the dot loses the sign extract, the `vpabsb` and
+the masked negate, and gains one `vpdpbusd` and one `vpsubd`. Four instructions
+become three and the unpack drops from six to five.
+
+The integers do not move. Each of the sixteen lanes covers four bytes, so the
+largest total in play is `4 * 15 * 127` and the largest correction
+`4 * 8 * 127`; neither comes near an int32, and the difference is the same
+integer the signed form produced, so the float that follows is the same float.
+
+**The scale pair is built as a vector.** The two scales are
+`ws[b] * xs[b]` and `ws[b+1] * xs[b+1]`, eight lanes each. Broadcasting each
+consecutive pair straight out of memory with one permute and multiplying the
+two vectors is five operations where the scalar form was nine, and the weight
+side does not depend on which activation row is being fused, so it is lifted
+out of the tile loop and paid once a block pair rather than once a block pair
+per row. Every lane still holds the same product of the same two floats through
+the same multiply.
+
+The carrier is a type — `IllQScale`, a `__m512` on a VNNI build and the two
+floats themselves everywhere else — so the fallback pair reads `lo` and `hi`
+one at a time exactly as it did, and nothing outside a VNNI build changes at
+all.
+
+**One prefetch a block pair.** Decode streams a whole weight plane once a token
+along a stride the loop knows and the hardware has to guess at. A prefetch
+issued a kilobyte ahead of the block the dot is on costs one instruction and is
+the only thing left in this kernel that the memory system can be told. The rows
+are contiguous, so running off the end of one reaches into the next, which is
+what a row-major sweep wants; running off the end of the plane is safe, because
+a prefetch of an address that is not mapped is architecturally a no-op and not
+a fault. That is why the loops do not test for it, and it is the whole reason
+the instruction is free.
+
+### What it is worth
+
+On `xeon-2.8b`, four threads, against a synthetic checkpoint of LFM2
+proportions — dim 1536, 16 layers, 6 attention and 10 convolution, feed forward
+3072 — as the best of three runs alternating between a binary built from the
+previous commit and this one:
+
+|      | weights  | prefill, 256 tok      | decode                |
+| ---- | -------- | --------------------- | --------------------- |
+| bf16 | 0.68 GiB | 295.3 → 302.7 tok/s   | 54.3 → 60.2 tok/s     |
+| q8   | 0.38 GiB | 325.6 → 394.9 tok/s   | 64.7 → 75.2 tok/s     |
+| q4   | 0.21 GiB | 310.7 → 348.6 tok/s   | 94.2 → 120.2 tok/s    |
+
+**q4 decode is 1.28x and q8 decode 1.16x**, prefill 1.12x and 1.21x. bf16 gets
+the prefetch and nothing else, and takes 1.11x on decode for it.
+
+Against that host's bare sweep of 13.6 / 26.3 / 51.2 GB/s at one, two and four
+threads, decode now reads its weights at 44.0 GB/s in bf16 (86% of the sweep),
+30.7 GB/s at q8 (60%) and 27.1 GB/s at q4 (53%); before this version those were
+77%, 52% and 41%. The ordering is the point: **the narrower the format, the
+further it still is from the memory ceiling**, because a narrow format is
+arithmetic standing between the read and the answer. q4 decode against q8's was
+1.46x and is now 1.60x.
+
+The kernels alone, one thread, as the minimum each reaches over runs
+alternating between the two builds:
+
+| plane, activation rows       | q8            | q4            |
+| ---------------------------- | ------------- | ------------- |
+| 2048 x 2048, one row         | 0.187 → 0.139 ms | 0.219 → 0.143 ms |
+| 2048 x 2048, eight rows      | 0.890 → 0.726 ms | 0.955 → 0.836 ms |
+| 16384 x 4096, one row        | 6.665 → 5.718 ms | 4.787 → 3.192 ms |
+
+The first shape is resident in this host's 33 MiB of L3 and is therefore the
+instruction count on its own: q4 takes 1.53x there, which is the three
+operations coming out. The last is four times the cache and is where the
+prefetch does its work.
+
+One refusal, measured while looking at item 5. A prefill re-reads the weight
+plane once per group of eight activation rows, so the obvious move is to cut
+the row range into L2-sized bands and run every tile group against a band
+before moving on. Over 4096 x 4096 with 64 tokens and 8192 x 2048 with 128,
+at bands of 128, 256, 512 and 1024 rows, that measured **1.00x to 1.02x** —
+inside the noise. The reuse it was meant to buy is already there, because a
+tile of eight rows reads each weight byte eight times and the working set a
+thread holds is a quarter of the plane. Item 5's packed panel layout is a
+different claim and is left open; the loop order is not where it is.
+
+### That it is the same answer
+
+The change is meant to move nothing, so it is held bit for bit rather than to a
+tolerance. Against a binary built from the previous commit, over a synthetic
+checkpoint with 124 added tokens in its vocabulary: `logits` and greedy
+`generate` agree exactly at bf16, q8 and q4, on one thread and on four —
+twelve comparisons, twelve identical digests — and the three formats give three
+different digests, so each path was genuinely taken. `tokens` agrees on the ids.
+
+**The published checkpoint was not re-run**, and that is a gap rather than an
+omission: `ckpt/lfm2.5-2.6b-a` in this tree is a Git LFS pointer and the weights
+are not here, so neither `test/test.py` nor a rate on the real 2.6B could be
+taken. Every number above belongs to the stand-in it names. The figures in the
+standing results for the published checkpoint are from 1.6.0 and are not
+re-taken here; what this version does to them is unmeasured and, on the
+evidence above, understated rather than overstated.
+
+### Code
+
+`app/core.c` part 5: `IllQScale` and its two builders, `ill_q8_scale_wide` and
+`ill_q8_scale_fuse`, in both the VNNI and the fallback arms; `ill_q8_pair`,
+`ill_q8_pair_wide` and `ill_q4_dot` take the carrier rather than two floats;
+`ill_q4_open` returns the codes; `ill_q4_dot` on a VNNI build is its own dot
+rather than a call into the q8 one, because the correction is what makes it
+cheaper and the q8 path has nothing to correct.
+
+`app/core.c` part 8: `ILL_AHEAD` and `ILL_AHEAD_BYTES`, one prefetch in each of
+the three dense bodies, and the block loops of the q8 and q4 bodies lift the
+weight side of the scale pair out of the tile loop.
+
+`test/test.c`: the three call sites of the paired dot build a carrier.
+
+### Tests
+
+Two checks, and both had to be written against what the arithmetic promises
+rather than against what the code does.
+
+**The paired dot keeps each block with its own scale** — the two blocks are
+given unequal weight scales and unequal activation scales, and the answer must
+be the two single-block dots with those products. A fuse that crossed the two
+halves of the register passes every check that uses the same scale twice and
+fails this one.
+
+**The q4 dot is the integer dot of the codes it stands for** — over a fixture
+that reaches both ends of the range, including the extreme that lands on -8,
+the answer must be the exact integer dot of the lifted bytes. A block whose
+codes were all eight would pass with no correction at all, which is why the
+fixture walks the range.
+
+They bite. A correction of seven instead of eight fails ten checks; making both
+halves of the scale pair take the low block's scale fails eighteen.
+
+The suite passes on the default, `--portable`, `--no-simd`, `--debug` and
+`--sanitize` builds, and under `--vulkan` on a host with no device, where the
+comparisons skip and the registry checks still run.
+
+**177 pass**, 175 before.
+
+---
+
+## 1.9.1 — the added tokens become a trie
+
+Added tokens are matched literally, at every byte of the input, before any
+splitting. The match was a walk of the whole list at every position: for each
+of the added tokens, a length check and a `memcmp`. The published checkpoint
+carries 124 of them, so an ordinary prompt paid a hundred and twenty-four
+compares a byte for text that contains none of them, which is almost all text.
+
+### What it took
+
+A byte trie over the same set, built once at load from the list the loader has
+already sorted longest first. The first byte of a token lives in a 256 entry
+head table rather than in a node of its own, so a position whose byte starts no
+added token is rejected by one indexed read and never touches the list at all.
+Below the head the children of a node are a linked list walked by byte, because
+the depth reached is one or two for anything that is not a real match.
+
+The bound on the node count is exactly the number of content bytes, since a
+trie shares prefixes and can never hold more nodes than the bytes put into it —
+124 added tokens of about thirty bytes each is under four thousand nodes and
+about sixty kilobytes, once, at load.
+
+The walk answers the **longest** token starting here, which is the answer the
+list gave: it was sorted by length and the first match won. Where two added
+tokens carry the same text the mark is written once, by the one the list would
+have found first, so that case does not move either.
+
+The suffix links an Aho-Corasick automaton would add are deliberately not here.
+They buy the worst case — text that repeatedly begins a long added token
+without finishing it — and cost a goto table of a couple of megabytes or a
+second set of links through every node. What they do not buy is the case that
+actually happens, where the head table has already answered in one read. If a
+checkpoint ever turns up whose added tokens make the walk deep on real text,
+the links go on top of this trie rather than instead of it.
+
+### What it is worth
+
+On `xeon-2.8b`, one thread. The scan alone over 64 KiB of text against a
+124-token stand-in shaped like the published set, best of twenty runs:
+**22.792 ms to 0.083 ms, 275x**. End to end, 100 kB of prose through
+`app_main tokens` against a synthetic checkpoint, where the load is under a
+hundredth of a second and the rest is the merge: **0.09 s to 0.02 s**. What is
+left is the byte-pair merging, which this version does not touch.
+
+### That it is the same answer
+
+`tokens` over a prompt carrying added tokens gives identical ids to a binary
+built from the previous commit, and the twelve `logits` and `generate`
+comparisons of 1.9.0 were taken through the same encoder.
+
+### Code
+
+`app/core.c` part 13: `IllTwig`, the three fields `twigs`, `twig_count` and
+`twig_head` on `IllVocab`, `ill_vocab_twine` to build and `ill_vocab_reach` to
+walk, a call to the builder where the list is sorted, and the scan in
+`ill_vocab_encode` reduced to one call. The storage goes through
+`ill_vocab_own`, so it is freed with the rest of the vocabulary and there is no
+new lifetime to get wrong.
+
+The walk is a function rather than the body of the loop so that it can be
+tested without a checkpoint, which is the only reason it is not inline.
+
+### Tests
+
+Seven checks, over a hand-built vocabulary of four added tokens where two share
+a prefix and two are wholly unrelated: that the trie builds; that it finds the
+longest token starting here rather than the first; that it falls back to the
+shorter one where the longer does not match; that it answers nothing where
+nothing starts; that it refuses a token the text only begins; that a token
+which is another's prefix is still found; and that it stops at the end of the
+text it was given.
+
+The last one is a bound rather than a formality, and had to be written twice to
+bite. Read through a string literal, the byte past the end is the terminator
+and matches no child, so dropping the bound changes nothing. Given a buffer
+whose next bytes are real and would complete a longer token, dropping the bound
+returns that longer token: the check now hands it `abc` with a span of two and
+requires the answer to be `ab`. Stopping the walk at the first mark instead of
+the deepest fails one check.
+
+**184 pass**, 177 before.

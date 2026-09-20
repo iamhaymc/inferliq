@@ -263,27 +263,47 @@ single multiply-add.
 q4 is the same block with the values at half the width, two to a byte: sixteen
 bytes and one scale where q8 spends thirty-two and one. The block's largest
 value is placed exactly on -8, so all sixteen levels are used and the scale
-carries a sign. A block lifts into the signed bytes the q8 dot already reads —
-and on any machine with vectors it lifts straight into the register, never
-through memory.
+carries a sign. A block lifts straight into a register on any machine with
+vectors, never through memory. Where the lift writes bytes — reading a row
+back, and the ragged block at the end of one — it writes the signed weights the
+q8 dot reads; where it lifts into a register for the paired dot it leaves the
+stored code, 0..15, alone, because that dot wants an unsigned operand and takes
+the eight back out against the activations instead.
 
 Where VNNI is present the loop takes blocks in pairs instead, because two
 blocks are 64 bytes and that is one 512 bit register whole:
 
 ```
-acc = fma( cvt_f32(dpbusd(|w_pair|, a_pair * sign(w_pair))),
-           [scale_lo x8, scale_hi x8], acc )
+q8: acc = fma( cvt_f32(dpbusd(|w_pair|, a_pair * sign(w_pair))), sv, acc )
+q4: acc = fma( cvt_f32(dpbusd(codes, a_pair) - dpbusd(8, a_pair)), sv, acc )
 ```
 
 `vpdpbusd` folds four byte products into a lane against `vpmaddwd`'s two, and
 it reads bytes directly, so the two widenings disappear as well — which on a
 host bound by instruction issue is the larger half of the saving. Its left
-operand is unsigned, so the weights go in as magnitudes and their sign moves
-onto the activations; AVX-512 has no `vpsignb`, so that move is `vpmovb2m` and
-a masked negate. Lanes 0..7 then carry the low block and lanes 8..15 the high
-one, which is why the scale goes in as a vector of two halves rather than a
-broadcast. Everything without VNNI folds the pair back into two single block
-steps in the same order, so only a VNNI build's output moves.
+operand is unsigned. q8 therefore sends the weights in as magnitudes and moves
+their sign onto the activations; AVX-512 has no `vpsignb`, so that move is
+`vpmovb2m` and a masked negate. **q4 has nothing to move**, because a nibble is
+already unsigned: it sends the stored codes and subtracts `8 * sum(a)` per
+lane, which is the same instruction against a constant eight. The integers are
+the same either way — four bytes to a lane means the total never leaves int32 —
+so this is three operations rather than four for the same answer.
+
+Lanes 0..7 carry the low block and lanes 8..15 the high one, so the two scales
+reach the multiply-add as one register, `sv`. That register is built by
+broadcasting each consecutive pair of scales out of memory with a permute and
+multiplying the weight side by the activation side — five operations where two
+scalar multiplies and an insert were nine — and the weight side is the same for
+every activation row in a tile, so it is lifted out of the tile loop.
+`IllQScale` is the carrier: a `__m512` here, and the two floats themselves
+everywhere else, where the pair folds back into two single block steps in the
+same order. Only a VNNI build's output moves.
+
+The one thing in `dense` that is not arithmetic is `ILL_AHEAD`, a prefetch a
+kilobyte ahead of the block the dot is on. Rows are contiguous, so running off
+the end of one reaches into the next; running off the end of the plane is
+architecturally a no-op rather than a fault, which is why the loops do not
+test for it.
 
 ### part 6 — json reader
 
@@ -407,6 +427,11 @@ inner loop never touches a string — it walks ids.
 Encoding runs in four stages:
 
 1. **added tokens** — matched literally, longest first, splitting the input.
+   The set is a byte trie whose first byte is a 256-entry head table, so a
+   position that starts no added token is rejected by one indexed read; below
+   the head a node's children are a linked list, because the depth reached is
+   one or two for anything that is not a real match. `ill_vocab_twine` builds
+   it at load and `ill_vocab_reach` walks it.
 2. **pre-tokenization** — the GPT-2 or Llama-3 alternation, transcribed in
    order rather than run through a regex engine. Which one is detected from the
    `Split` pattern in `tokenizer.json`.
@@ -575,7 +600,12 @@ inner loop, then the attention score loop at long context, then everything else
 together. In q8 the inner loop is `ill_q8_pair`, which takes two 32-value
 blocks at once because that is one 512 bit register; `ill_q8_step` is the
 single block form it falls back to for an odd trailing block and on
-instruction sets without VNNI.
+instruction sets without VNNI. In q4 it is `ill_q4_dot`, over the pair
+`ill_q4_open` has just unpacked into a register.
+
+The numbers above are 1.6.0's and the kernel has moved since: what 1.9.0 took
+out of that inner loop is in `CHANGES.md`, and the 89% figure is a floor for
+the kernel the engine has now.
 
 ---
 
