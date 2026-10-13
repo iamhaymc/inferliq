@@ -30,7 +30,7 @@ Seven source files, flat, no build system, plus the published checkpoints in
 | `test/test.c` | ~1500 | unit tests over both engines' internals |
 | `test/diff.py` | ~780 | comparison against Hugging Face `transformers` |
 | `util/make.py` | ~280 | install, build, test, run, bench, clean |
-| `util/tune.py` | ~1700 | fine tuning on the reference side, the caveman rule engine, and the heretic abliteration pass |
+| `util/lm_tune.py` | ~1700 | fine tuning on the reference side, the caveman rule engine, and the heretic abliteration pass |
 | `data/tune.jsonl` | 202 rows | the tuning corpus |
 | `data/models/` | — | the checkpoints; `data/models/lfm2.5-2.6b-a` is the one this engine runs |
 

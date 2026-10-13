@@ -282,7 +282,7 @@ kernel.
 ## ↘️ FINETUNE
 
 The engine has no trainer. A tune happens on the reference side and comes back
-as a checkpoint the engine reads unchanged: `util/tune.py` trains a LoRA adapter
+as a checkpoint the engine reads unchanged: `util/lm_tune.py` trains a LoRA adapter
 over the frozen base, folds it into the float weights, and writes
 `build/tune/merged` in the same layout as `data/models/lfm2.5-2.6b-a`.
 
@@ -305,11 +305,11 @@ One question — "Explain database connection pooling" — carried at all four
 levels in the corpus, counted with the checkpoint's own tokenizer.
 
 ```sh
-python3 util/tune.py --lint                           # audit the corpus
-python3 util/tune.py --model data/models/lfm2.5-2.6b-a --uncensor     # abliterate into build/tune/uncensored
-python3 util/tune.py --model data/models/lfm2.5-2.6b-a --train        # LoRA adapter into build/tune
-python3 util/tune.py --model data/models/lfm2.5-2.6b-a --merge        # fold it into build/tune/merged
-python3 util/tune.py --model data/models/lfm2.5-2.6b-a --check --tuned build/tune/merged
+python3 util/lm_tune.py --lint                           # audit the corpus
+python3 util/lm_tune.py --model data/models/lfm2.5-2.6b-a --uncensor     # abliterate into build/tune/uncensored
+python3 util/lm_tune.py --model data/models/lfm2.5-2.6b-a --train        # LoRA adapter into build/tune
+python3 util/lm_tune.py --model data/models/lfm2.5-2.6b-a --merge        # fold it into build/tune/merged
+python3 util/lm_tune.py --model data/models/lfm2.5-2.6b-a --check --tuned build/tune/merged
 ```
 
 `--check` is the number that says whether it worked: it runs the base and the
@@ -339,12 +339,12 @@ weights 4-bit for a smaller card, and `--uncensor-out` writes somewhere else.
 The steps chain, so the whole thing is one command:
 
 ```sh
-python3 util/tune.py --model data/models/lfm2.5-2.6b-a --uncensor --train --merge
+python3 util/lm_tune.py --model data/models/lfm2.5-2.6b-a --uncensor --train --merge
 ```
 
 The adapter then trains over the decensored weights rather than over the base,
 which is what will be served. Two settings are this checkpoint's rather than
-heretic's, and `util/tune.py`'s header says why: the response prefix is
+heretic's, and `util/lm_tune.py`'s header says why: the response prefix is
 `</think>`, because LFM2.5's template has already opened the think block and
 refusals would otherwise be counted over reasoning text; and the divergence
 heretic balances its two objectives at follows the export cap, so the search
@@ -354,7 +354,7 @@ the item.
 
 ## ↘️ BENCHMARKS
 
-`util/eval.py` scores a checkpoint on nine public benchmarks, and the thing it
+`util/lm_eval.py` scores a checkpoint on nine public benchmarks, and the thing it
 scores is **this engine**: `build/app_main generate` is registered with
 inspect-ai as a model provider, so every sample is a run of the C engine over
 the checkpoint rather than of `transformers` over the same weights. The tasks
@@ -364,11 +364,11 @@ line — which is the only part of this that needs installing:
 
 ```sh
 pip install -e .                                  # lighteval and langdetect
-python3 util/eval.py --model data/models/lfm2.5-2.6b-a            # the nine benchmarks
-python3 util/eval.py --model data/models/lfm2.5-2.6b-a --samples 200   # a longer run
-python3 util/eval.py --tasks ifeval,boolq --model data/models/lfm2.5-2.6b-a
-python3 util/eval.py --model data/models/lfm2.5-2.6b-a --rival hf-inference-providers/Qwen/Qwen3-4B
-python3 util/eval.py --chart                      # redraw from the last results
+python3 util/lm_eval.py --model data/models/lfm2.5-2.6b-a            # the nine benchmarks
+python3 util/lm_eval.py --model data/models/lfm2.5-2.6b-a --samples 200   # a longer run
+python3 util/lm_eval.py --tasks ifeval,boolq --model data/models/lfm2.5-2.6b-a
+python3 util/lm_eval.py --model data/models/lfm2.5-2.6b-a --rival hf-inference-providers/Qwen/Qwen3-4B
+python3 util/lm_eval.py --chart                      # redraw from the last results
 ```
 
 | benchmark              | task           | what it asks                               |
@@ -393,7 +393,7 @@ benchmark exists to show.
 Two of the nine need more than the backend has. **bAbI QA** ships in lighteval
 without its inspect-ai half — no `sample_fields`, no scorer, and a prompt
 function that decodes every answer as a compass path and so raises on the
-subset the task selects — and `util/eval.py` supplies all of it. **Long
+subset the task selects — and `util/lm_eval.py` supplies all of it. **Long
 Horizon Execution** is not in lighteval at any version, so it is generated: a
 seeded dictionary, a plan of N lookups over it, and one answer that is the
 values concatenated in plan order, after the benchmark in "The Illusion of

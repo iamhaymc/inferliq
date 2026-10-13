@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""util/tune.py - tunes the checkpoint into caveman speech, and repacks it.
+"""util/lm_tune.py - tunes the checkpoint into caveman speech, and repacks it.
 
 The engine reads the Hugging Face checkpoint directly and has no trainer of
 its own, so a tune happens on the reference side: a LoRA adapter trains over
@@ -30,17 +30,17 @@ Six steps, each needing only what the one before it produced. `--uncensor` is
 the one that is optional -- the tune runs with it or without it -- and every
 step after it reads what it wrote:
 
-    python3 util/tune.py --lint                                  audit the corpus
-    python3 util/tune.py --make-data --source raw.jsonl          grow the corpus
-    python3 util/tune.py --model data/models/lfm2.5-0.4b --uncensor            abliterate refusals
-    python3 util/tune.py --model data/models/lfm2.5-0.4b --train
-    python3 util/tune.py --model data/models/lfm2.5-0.4b --merge
-    python3 util/tune.py --model data/models/lfm2.5-0.4b --check --tuned build/tune/merged
+    python3 util/lm_tune.py --lint                                  audit the corpus
+    python3 util/lm_tune.py --make-data --source raw.jsonl          grow the corpus
+    python3 util/lm_tune.py --model data/models/lfm2.5-0.4b --uncensor            abliterate refusals
+    python3 util/lm_tune.py --model data/models/lfm2.5-0.4b --train
+    python3 util/lm_tune.py --model data/models/lfm2.5-0.4b --merge
+    python3 util/lm_tune.py --model data/models/lfm2.5-0.4b --check --tuned build/tune/merged
 
 They also compose, which is the point of the chaining: one command takes the
 published weights to a decensored, tuned checkpoint with nobody watching it.
 
-    python3 util/tune.py --model data/models/lfm2.5-0.4b --uncensor --train --merge
+    python3 util/lm_tune.py --model data/models/lfm2.5-0.4b --uncensor --train --merge
 
 `--train` writes `build/tune/adapter` (the PEFT adapter) and `build/tune/`
 (its trainer state). `--merge` folds the adapter into the base weights and

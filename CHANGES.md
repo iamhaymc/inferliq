@@ -202,7 +202,7 @@ got it building under MSVC on Windows.
 The flat file list became directories: the engine and its command line moved to
 `app/core.c` and `app/main.c`, the two test suites to `test/test.c` and
 `test/diff.py`, and the Python workflows to `util/make.py` (was `run.py`) and
-`util/tune.py` (was `app_tune.py`). The tuning corpus moved to
+`util/lm_tune.py` (was `app_tune.py`). The tuning corpus moved to
 `data/tune.jsonl` and the published checkpoints to `ckpt/lfm2.5-0.4b`, `ckpt/lfm2.5-1.2b-i` and
 `ckpt/lfm2.5-2.6b-a`. The engine sources are renamed, not split: `app/main.c` and
 `test/test.c` still include the engine whole, so each front end remains one
