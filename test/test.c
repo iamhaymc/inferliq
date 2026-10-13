@@ -1,7 +1,7 @@
 /* ============================================================================
  * test/test.c -- unit tests for the engine internals.
  *
- * test/test.py proves the whole stack against transformers.  This file proves
+ * test/diff.py proves the whole stack against transformers.  This file proves
  * the parts underneath it: number formats, the json reader, every compute
  * kernel against a plain-C restatement of the same maths, the thread pool, the
  * tokenizer machinery, and the sampler.

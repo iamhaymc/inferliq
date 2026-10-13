@@ -1,4 +1,4 @@
-# GUIDE
+# ⏬ INFERLIQ — Design
 
 A tour of the implementation: what the engine computes, how the code is
 arranged, and where to change it.
@@ -19,7 +19,7 @@ arranged, and where to change it.
 ## 1. The shape of the project
 
 Seven source files, flat, no build system, plus the published checkpoints in
-`ckpt/`.
+`data/models/`.
 
 | file | lines | role |
 | --- | --- | --- |
@@ -28,11 +28,11 @@ Seven source files, flat, no build system, plus the published checkpoints in
 | `app/yolo.c` | ~4700 | the picture engine, the same way, with its own command line under `YOLO_MAIN` |
 | `app/vulk.c` | ~4300 | the Vulkan backend for both engines' seams; compiled in by `--vulkan` |
 | `test/test.c` | ~1500 | unit tests over both engines' internals |
-| `test/test.py` | ~780 | comparison against Hugging Face `transformers` |
+| `test/diff.py` | ~780 | comparison against Hugging Face `transformers` |
 | `util/make.py` | ~280 | install, build, test, run, bench, clean |
 | `util/tune.py` | ~1700 | fine tuning on the reference side, the caveman rule engine, and the heretic abliteration pass |
 | `data/tune.jsonl` | 202 rows | the tuning corpus |
-| `ckpt/` | — | the checkpoints; `ckpt/lfm2.5-2.6b-a` is the one this engine runs |
+| `data/models/` | — | the checkpoints; `data/models/lfm2.5-2.6b-a` is the one this engine runs |
 
 Sections 2 through 9 are about the text engine. The picture engine has its own
 tour in section 10; it shares this file's conventions and nothing else, because
@@ -476,7 +476,7 @@ app_main info      describe the checkpoint and the load plan
 app_main tokens    encode --prompt, or decode --tokens
 app_main generate  continue a prompt and stream the completion
 app_main chat      interactive conversation on stdin
-app_main logits    write logits, the hook test/test.py compares against
+app_main logits    write logits, the hook test/diff.py compares against
 app_main bench     time prefill and decode
 app_main perplexity  score a text, so an accuracy trade has a number
 ```
@@ -526,7 +526,7 @@ that drafts a continuation from the context; the q4 pack and both of its
 lifts; and the sampler for seed replay,
 nucleus containment, and repetition demotion.
 
-**`test/test.py` — 19 comparisons against `transformers`.** Small Liquid
+**`test/diff.py` — 19 comparisons against `transformers`.** Small Liquid
 checkpoints are built with random weights and run through both implementations.
 The matrix covers attention-only, convolution-only, and hybrid stacks; grouped
 and multi query attention; tied and untied heads; wide and biased kernels;
@@ -548,8 +548,8 @@ UndefinedBehaviorSanitizer. Both suites run clean, including leak detection.
 
 A real checkpoint is tested the same way: `make.py test --model PATH` adds a
 logits comparison and a tokenizer comparison against it, for 25 comparisons in
-all. The published checkpoints ship in `ckpt/` (`ckpt/lfm2.5-0.4b-e`, `ckpt/lfm2.5-2.6b-a`), 
-with the smallest the default, so this runs by default, and it adds two further checks 
+all. The published checkpoint ships in `data/models/lfm2.5-2.6b-a`,
+and is the default, so this runs by default, and it adds two further checks 
 the synthetic suite cannot make:
 
 - **throughput** — the engine's `bench` beside transformers doing the same
@@ -823,8 +823,8 @@ lines that neither engine should own twice.
 
 ```sh
 python3 util/make.py build --vulkan
-./build/app_main generate --model ckpt/lfm2.5-2.6b-a --backend vulkan --prompt "..."
-./build/app_yolo ckpt/yolo26/yolo26n.pt photo.png --device ""
+./build/app_main generate --model data/models/lfm2.5-2.6b-a --backend vulkan --prompt "..."
+./build/app_yolo data/models/yolo26/yolo26n.pt photo.png --device ""
 ```
 
 A device is chosen by preference — discrete, then integrated, then software —

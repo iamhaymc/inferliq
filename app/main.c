@@ -6,7 +6,7 @@
  *   tokens    encode text to ids, or decode ids back to text
  *   generate  continue a prompt and stream the result
  *   chat      hold a turn by turn conversation
- *   logits    dump raw logits, the hook test/test.py compares against
+ *   logits    dump raw logits, the hook test/diff.py compares against
  *   bench     measure prefill and decode throughput
  *   perplexity  score a text, so an accuracy trade has a number
  *

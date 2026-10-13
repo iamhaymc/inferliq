@@ -1,4 +1,4 @@
-# CHANGES
+# ⏬ INFERLIQ — Changes
 
 Development progress and the reasoning behind it. The log below runs oldest
 first; what spans versions is collected here at the top instead.
@@ -85,7 +85,7 @@ Measured by `perplexity` (1.3.0) on the published 2.6B checkpoint, over two
 unlike texts — technical prose, and licence boilerplate a model has seen many
 times:
 
-| | `GUIDE.md` prose, 2056 tokens | Apache licence, 1900 tokens |
+| | `DESIGN.md` prose, 2056 tokens | Apache licence, 1900 tokens |
 | --- | --- | --- |
 | bf16, as stored | 3.6080 nats — 36.892 | 0.6798 nats — 1.9734 |
 | q8, repacked | 3.5999 nats — 36.594 | 0.6756 nats — 1.9651 |
@@ -201,7 +201,7 @@ got it building under MSVC on Windows.
 
 The flat file list became directories: the engine and its command line moved to
 `app/core.c` and `app/main.c`, the two test suites to `test/test.c` and
-`test/test.py`, and the Python workflows to `util/make.py` (was `run.py`) and
+`test/diff.py`, and the Python workflows to `util/make.py` (was `run.py`) and
 `util/tune.py` (was `app_tune.py`). The tuning corpus moved to
 `data/tune.jsonl` and the published checkpoints to `ckpt/lfm2.5-0.4b`, `ckpt/lfm2.5-1.2b-i` and
 `ckpt/lfm2.5-2.6b-a`. The engine sources are renamed, not split: `app/main.c` and
@@ -353,7 +353,7 @@ what it found. A tensor of the wrong extent names the tensor and both shapes. A
 rewind that the convolution state cannot honour returns `ILL_STATE` instead of
 guessing. The one deliberate approximation in the engine — Unicode character
 classes by range table rather than by the full database — is called out in the
-code, in `GUIDE.md`, and in `TODO.md`.
+code, in `DESIGN.md`, and in `TODO.md`.
 
 ### Optimisation, in the order it happened
 
@@ -481,7 +481,7 @@ comparison tightened from a fixed threshold to the reference's own movement.
 ### Code
 
 `app_test.py` grew the two checks and the default model path. `bench/` is
-deleted. `README.md`, `GUIDE.md`, and `TODO.md` no longer name it.
+deleted. `README.md`, `DESIGN.md`, and `TODO.md` no longer name it.
 
 ### Tests
 
@@ -639,11 +639,11 @@ direction.
 ### What it is worth
 
 The published 2.6B checkpoint on `xeon-2.8`, over two texts that are nothing
-like each other: about 2050 tokens of this repository's own `GUIDE.md`, which
+like each other: about 2050 tokens of this repository's own `DESIGN.md`, which
 is technical prose with tables in it, and about 1900 tokens of the Apache
 licence, which is boilerplate a model has seen many times.
 
-| | GUIDE.md prose | licence boilerplate |
+| | DESIGN.md prose | licence boilerplate |
 | --- | --- | --- |
 | bf16, as stored | 3.6080 nats — **36.892** | 0.6798 nats — **1.9734** |
 | q8, repacked | 3.5999 nats — **36.594** | 0.6756 nats — **1.9651** |
@@ -1108,7 +1108,7 @@ a command line under `YOLO_MAIN`.
 
 `util/make.py`: `app_yolo` as a third target, built with `-DYOLO_MAIN` and at
 `-O2 -funroll-loops`; a `yolo` workflow that hands arguments to it.
-`AGENTS.md`, `GUIDE.md` §10, `README.md`: the second engine, and the argument
+`AGENTS.md`, `DESIGN.md` §10, `README.md`: the second engine, and the argument
 for opening a file list that says it is closed.
 
 ### Tests
@@ -1334,7 +1334,7 @@ bytes crossed.
 libc. No second build step and no probe for an SDK, because there is nothing to
 probe for.
 
-`AGENTS.md`, `README.md`, `GUIDE.md`, `TODO.md`: the new file and the second
+`AGENTS.md`, `README.md`, `DESIGN.md`, `TODO.md`: the new file and the second
 argument for opening a list that says it is closed, what selects the backend,
 and what is left.
 
@@ -1522,7 +1522,7 @@ different digests, so each path was genuinely taken. `tokens` agrees on the ids.
 
 **The published checkpoint was not re-run**, and that is a gap rather than an
 omission: `ckpt/lfm2.5-2.6b-a` in this tree is a Git LFS pointer and the weights
-are not here, so neither `test/test.py` nor a rate on the real 2.6B could be
+are not here, so neither `test/diff.py` nor a rate on the real 2.6B could be
 taken. Every number above belongs to the stand-in it names. The figures in the
 standing results for the published checkpoint are from 1.6.0 and are not
 re-taken here; what this version does to them is unmeasured and, on the

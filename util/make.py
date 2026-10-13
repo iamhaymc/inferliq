@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """util/make.py -- the project's workflows: install, build, test, run.
 
-  python3 util/make.py install            set up the reference stack for test/test.py
+  python3 util/make.py install            set up the reference stack for test/diff.py
   python3 util/make.py build              compile app/main.c, app/yolo.c and test/test.c into build/
   python3 util/make.py test               run the unit tests and the reference suite
   python3 util/make.py run -- <args>      build, then hand <args> to app
@@ -207,7 +207,7 @@ def do_install(args):
     code = call([python, "-m", "pip", "install", "--upgrade", "pip", "--quiet"])
     code |= call([python, "-m", "pip", "install", *NEEDS])
     if code != 0:
-        print("\ninstall failed.  The reference stack is only needed by test/test.py;\n"
+        print("\ninstall failed.  The reference stack is only needed by test/diff.py;\n"
               "the engine itself builds and runs with no dependencies at all.")
     _ = args
     return 0 if code == 0 else 1
@@ -232,7 +232,7 @@ def do_test(args):
     if probe != 0:
         print("  transformers is not installed; skipping (python3 util/make.py install)")
         return 0
-    cmd = [python, os.path.join(ROOT, "test", "test.py"), "--binary", binary]
+    cmd = [python, os.path.join(ROOT, "test", "diff.py"), "--binary", binary]
     if args.model:
         cmd += ["--model", args.model]
     if args.no_checkpoint:
@@ -271,7 +271,7 @@ def do_bench(args):
     code = do_build(args)
     if code != 0:
         return code
-    model = args.model or os.path.join(ROOT, "ckpt", "lfm2.5-2.6b-a")
+    model = args.model or os.path.join(ROOT, "data", "models", "lfm2.5-2.6b-a")
     if not os.path.isdir(model):
         print(f"bench needs a checkpoint: {model} not found; pass --model PATH")
         return 1
@@ -322,7 +322,7 @@ def main():
                         help="compile app/vulk.c into both engines and the tests")
     parser.add_argument("--model", default=None, help="checkpoint folder")
     parser.add_argument("--no-checkpoint", action="store_true",
-                        help="skip the checkpoint suite even when ./ckpt/lfm2.5-2.6b-a exists")
+                        help="skip the checkpoint suite even when ./data/models/lfm2.5-2.6b-a exists")
     parser.add_argument("--filter", default=None, help="subset of reference checks to run")
     # Everything after a literal `--` belongs to app, not to this script,
     # so it is split off before argparse sees it.

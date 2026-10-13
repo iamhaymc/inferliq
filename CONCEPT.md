@@ -1,4 +1,4 @@
-# TODO (Seed)
+# ⏬ INFERLIQ — Concept
 
 Seed development tasks to construct the project.
 Nothing here shall be edited after initial construction.
@@ -27,7 +27,7 @@ The project structure should be flat and restricted to the following files:
 - run.py: ci/cd workflows: install, build, test, run 
 - TODO.md: flat list of open development tasks
 - CHANGES.md: development progress and rationale
-- GUIDE.md: a complete tour of the project implementation
+- DESIGN.md: a complete tour of the project implementation
 - README.md: summary and quickstart
 
 Ask me any questions for clarification if needed.

@@ -1,7 +1,7 @@
 <table>
 <tbody>
 <tr>
-<td><img src="./docs/brand/logo_3.svg" width="64px"/></td>
+<td><img src="./data/_brand/logo_2.svg" width="64px"/></td>
 <td><h1 style="color:#123;">INFERLIQ</h1></td>
 </tr>
 </tbody>
@@ -17,9 +17,9 @@ with acceleration through Vulkan.
 
 ```sh
 python3 util/make.py build                             # a few seconds, no dependencies
-./build/app_main info      --model ckpt/lfm2.5-2.6b-a
-./build/app_main generate  --model ckpt/lfm2.5-2.6b-a --prompt "Write a haiku about rivers."
-./build/app_main chat      --model ckpt/lfm2.5-2.6b-a
+./build/app_main info      --model data/models/lfm2.5-2.6b-a
+./build/app_main generate  --model data/models/lfm2.5-2.6b-a --prompt "Write a haiku about rivers."
+./build/app_main chat      --model data/models/lfm2.5-2.6b-a
 ```
 
 Add `--quant q8` to halve the memory and roughly double decode speed, or
@@ -39,18 +39,18 @@ section says what it is and is not worth today.
 
 ```sh
 python3 util/make.py test                                 # unit tests plus reference comparison
-python3 util/make.py bench --model ckpt/lfm2.5-2.6b-a     # prefill and decode throughput
-./build/app_main perplexity --model ckpt/lfm2.5-2.6b-a --quant q8 < some.txt
+python3 util/make.py bench --model data/models/lfm2.5-2.6b-a     # prefill and decode throughput
+./build/app_main perplexity --model data/models/lfm2.5-2.6b-a --quant q8 < some.txt
 python3 util/make.py run -- generate --model DIR --prompt "hello"
-python3 util/make.py yolo -- ckpt/yolo26/yolo26n.pt photo.jpg --draw out.png
+python3 util/make.py yolo -- data/models/yolo26/yolo26n.pt photo.jpg --draw out.png
 ```
 
 `make.py test` needs `torch` and `transformers`, which `python3 util/make.py install`
 provides. The engine itself has no dependencies at all. The published
-checkpoints ship in `ckpt/` — `ckpt/lfm2.5-2.6b-a` (a 2.6B causal model), beside an
+checkpoints ship in `data/models/` — `data/models/lfm2.5-2.6b-a` (a 2.6B causal model), beside an
 encoder and a vision-language checkpoint this engine does not run — so the checkpoint
 suite — logits, tokenizer, throughput, and greedy behaviour against the
-reference — runs by default against `ckpt/lfm2.5-2.6b-a`; `--no-checkpoint` skips it,
+reference — runs by default against `data/models/lfm2.5-2.6b-a`; `--no-checkpoint` skips it,
 and `--model PATH` points somewhere else.
 
 Compare like with like: the throughput check runs both sides at bf16 and the
@@ -85,11 +85,11 @@ Ultralytics publishes, which is a zip holding a pickled module tree and its raw
 fp16 weights. There is no export step and no Python in the path.
 
 ```sh
-./build/app_yolo ckpt/yolo26/yolo26n.pt photo.jpg
-./build/app_yolo ckpt/yolo26/yolo26n-seg.pt photo.jpg --draw out.png
-./build/app_yolo ckpt/yolo26/yolo26n.pt photo.jpg --nms-free
-./build/app_yolo ckpt/yolo26/yolo26x-pose.pt photo.jpg --conf 0.4
-./build/app_yolo ckpt/yolo26/yolo26n-cls.pt photo.jpg
+./build/app_yolo data/models/yolo26/yolo26n.pt photo.jpg
+./build/app_yolo data/models/yolo26/yolo26n-seg.pt photo.jpg --draw out.png
+./build/app_yolo data/models/yolo26/yolo26n.pt photo.jpg --nms-free
+./build/app_yolo data/models/yolo26/yolo26x-pose.pt photo.jpg --conf 0.4
+./build/app_yolo data/models/yolo26/yolo26n-cls.pt photo.jpg
 ```
 
 All five tasks run: detection, segmentation with per-instance masks, pose with
@@ -112,7 +112,7 @@ decoded pixels — see **Comparison** below.
 YoloModel *model; YoloSession *session; YoloOptions options;
 YoloImage image; const YoloResult *result;
 
-yolo_model_open("ckpt/yolo26/yolo26n.pt", &model);
+yolo_model_open("data/models/yolo26/yolo26n.pt", &model);
 yolo_options_default(model, &options);
 yolo_session_open(model, &options, &session);
 yolo_image_read("photo.jpg", &image);
@@ -163,19 +163,19 @@ not one set of dimensions.
 The picture engine (`app/yolo.c`) is a separate translation unit with its own
 seam and its own store; the two share conventions and nothing else.
 
-| capability            | supported                                                            |
-| --------------------- | -------------------------------------------------------------------- |
-| checkpoint            | an Ultralytics `.pt` read directly — zip, pickle, fp16 storages       |
-| tasks                 | detect, segment, pose, obb, classify                                  |
-| sizes                 | n, s, m, l, x — read from the checkpoint, not from a scale table      |
-| detection heads       | one-to-many with suppression (the default), and the NMS-free one-to-one |
+| capability            | supported                                                                |
+| --------------------- | ------------------------------------------------------------------------ |
+| checkpoint            | an Ultralytics `.pt` read directly — zip, pickle, fp16 storages          |
+| tasks                 | detect, segment, pose, obb, classify                                     |
+| sizes                 | n, s, m, l, x — read from the checkpoint, not from a scale table         |
+| detection heads       | one-to-many with suppression (the default), and the NMS-free one-to-one  |
 | stored weight formats | f16, bf16, f32, f64 and the integer storages, all widened to f32 at load |
-| picture formats       | everything stb reads; binary PNM without it                           |
-| backends              | a nine-operation seam: CPU, and Vulkan on a `--vulkan` build          |
+| picture formats       | everything stb reads; binary PNM without it                              |
+| backends              | a nine-operation seam: CPU, and Vulkan on a `--vulkan` build             |
 
 ## ↘️ EVALUATE
 
-`test/test.py` builds small Liquid checkpoints with random weights, runs them
+`test/diff.py` builds small Liquid checkpoints with random weights, runs them
 through both this engine and Hugging Face `transformers`, and compares logits
 position by position. It covers attention-only, convolution-only, and hybrid
 stacks; grouped and multi query attention; tied and untied output heads; wide
@@ -196,10 +196,10 @@ AVX-512 and VNNI. **These are 1.6.0's numbers and are not re-taken**: 1.9.0
 made the quantised dot faster and there is no host here with those weights on
 it, so read them as a floor rather than as the rate:
 
-|         | weights  | prefill, 256 tok | decode     |
-| ------- | -------- | ---------------- | ---------- |
-| q8      | 2.83 GiB | 32.2 tok/s       | 9.7 tok/s  |
-| q4      | 1.57 GiB | 30.0 tok/s       | 11.9 tok/s |
+|     | weights  | prefill, 256 tok | decode     |
+| --- | -------- | ---------------- | ---------- |
+| q8  | 2.83 GiB | 32.2 tok/s       | 9.7 tok/s  |
+| q4  | 1.57 GiB | 30.0 tok/s       | 11.9 tok/s |
 
 q8 decode on that host is 32.5 GB/s of weight traffic against a 36.6 GB/s bare
 memory sweep, which is 89% of what the machine can fetch — at q8 decode is the
@@ -227,11 +227,11 @@ four cores at 2.80 GHz with AVX-512 and VNNI whose bare sweep is 13.6 / 26.3 /
 51.2 GB/s at one, two and four threads, as the best of three runs alternating
 between the two builds:
 
-|      | weights  | prefill, 256 tok    | decode              |
-| ---- | -------- | ------------------- | ------------------- |
-| bf16 | 0.68 GiB | 295.3 → 302.7 tok/s | 54.3 → 60.2 tok/s   |
-| q8   | 0.38 GiB | 325.6 → 394.9 tok/s | 64.7 → 75.2 tok/s   |
-| q4   | 0.21 GiB | 310.7 → 348.6 tok/s | 94.2 → 120.2 tok/s  |
+|      | weights  | prefill, 256 tok    | decode             |
+| ---- | -------- | ------------------- | ------------------ |
+| bf16 | 0.68 GiB | 295.3 → 302.7 tok/s | 54.3 → 60.2 tok/s  |
+| q8   | 0.38 GiB | 325.6 → 394.9 tok/s | 64.7 → 75.2 tok/s  |
+| q4   | 0.21 GiB | 310.7 → 348.6 tok/s | 94.2 → 120.2 tok/s |
 
 Decode there reads its weights at 86% of that host's sweep in bf16, 60% at q8
 and 53% at q4 — the narrower the format, the further it still is from the
@@ -240,21 +240,21 @@ the answer.
 
 ### ➖ Pictures, against ultralytics
 
-`app/yolo.c` against `ultralytics` 8.3.222 out of `ckpt/yolo26/py`, on the two
+`app/yolo.c` against `ultralytics` 8.3.222 out of `data/models/yolo26/py`, on the two
 pictures ultralytics ships, on the same four-core AVX-512 host. **Compared on
 the same decoded pixels** — stb and OpenCV do not agree on a JPEG to the last
 unit, so the pictures are written out as PNG first and a `.jpg` comparison
 would measure the two decoders as much as the engines.
 
-| checkpoint | picture | reference | engine |
-| --- | --- | --- | --- |
-| yolo26n | bus | bus 0.881, person 0.872, 0.861, 0.846, 0.656 | the same, every digit |
-| yolo26n `--nms-free` | zidane | person 0.915, 0.910, tie 0.527 | the same, every digit |
-| yolo26s | bus | person 0.923, bus 0.923, person 0.898, 0.846, 0.833 | the same, every digit |
-| yolo26x-seg | bus | bus 0.939, person 0.937, 0.923, 0.896, 0.754, 0.588 | the same, every digit |
-| yolo26n-pose | bus | five people and their keypoints | the same, every digit |
-| yolo26n-obb | bus | ground track field 0.027, centre 12.1 284.4, angle 0.449 | the same, every digit |
-| yolo26n-cls | bus | minibus 0.5165 | the same |
+| checkpoint           | picture | reference                                                | engine                |
+| -------------------- | ------- | -------------------------------------------------------- | --------------------- |
+| yolo26n              | bus     | bus 0.881, person 0.872, 0.861, 0.846, 0.656             | the same, every digit |
+| yolo26n `--nms-free` | zidane  | person 0.915, 0.910, tie 0.527                           | the same, every digit |
+| yolo26s              | bus     | person 0.923, bus 0.923, person 0.898, 0.846, 0.833      | the same, every digit |
+| yolo26x-seg          | bus     | bus 0.939, person 0.937, 0.923, 0.896, 0.754, 0.588      | the same, every digit |
+| yolo26n-pose         | bus     | five people and their keypoints                          | the same, every digit |
+| yolo26n-obb          | bus     | ground track field 0.027, centre 12.1 284.4, angle 0.449 | the same, every digit |
+| yolo26n-cls          | bus     | minibus 0.5165                                           | the same              |
 
 Underneath the printed digits, the shaped input is **bit for bit identical** to
 what the reference feeds its model, and the head's class logits agree to
@@ -268,11 +268,11 @@ resolution difference out, the areas agree to a third of a percent.
 
 Rates on that host, yolo26n at 640 over bus.png, the minimum of five runs:
 
-| | shape | forward | decode | total |
-| --- | --- | --- | --- | --- |
-| detect, 480x640 | 5 ms | 397 ms | 2 ms | 405 ms |
-| classify, 224x224 | 2 ms | 50 ms | 0 ms | 57 ms |
-| obb, 768x1024 | 21 ms | 2035 ms | 0 ms | 2056 ms |
+|                   | shape | forward | decode | total   |
+| ----------------- | ----- | ------- | ------ | ------- |
+| detect, 480x640   | 5 ms  | 397 ms  | 2 ms   | 405 ms  |
+| classify, 224x224 | 2 ms  | 50 ms   | 0 ms   | 57 ms   |
+| obb, 768x1024     | 21 ms | 2035 ms | 0 ms   | 2056 ms |
 
 One thread, no intrinsics — the kernels are written in the shape a compiler
 vectorises rather than in the instruction set of one host. Threading is the
@@ -284,7 +284,7 @@ kernel.
 The engine has no trainer. A tune happens on the reference side and comes back
 as a checkpoint the engine reads unchanged: `util/tune.py` trains a LoRA adapter
 over the frozen base, folds it into the float weights, and writes
-`build/tune/merged` in the same layout as `ckpt/lfm2.5-2.6b-a`.
+`build/tune/merged` in the same layout as `data/models/lfm2.5-2.6b-a`.
 
 What it tunes for is **caveman**, the compression register described by the
 skill at <https://github.com/JuliusBrussee/caveman>: drop articles, filler,
@@ -306,10 +306,10 @@ levels in the corpus, counted with the checkpoint's own tokenizer.
 
 ```sh
 python3 util/tune.py --lint                           # audit the corpus
-python3 util/tune.py --model ckpt/lfm2.5-2.6b-a --uncensor     # abliterate into build/tune/uncensored
-python3 util/tune.py --model ckpt/lfm2.5-2.6b-a --train        # LoRA adapter into build/tune
-python3 util/tune.py --model ckpt/lfm2.5-2.6b-a --merge        # fold it into build/tune/merged
-python3 util/tune.py --model ckpt/lfm2.5-2.6b-a --check --tuned build/tune/merged
+python3 util/tune.py --model data/models/lfm2.5-2.6b-a --uncensor     # abliterate into build/tune/uncensored
+python3 util/tune.py --model data/models/lfm2.5-2.6b-a --train        # LoRA adapter into build/tune
+python3 util/tune.py --model data/models/lfm2.5-2.6b-a --merge        # fold it into build/tune/merged
+python3 util/tune.py --model data/models/lfm2.5-2.6b-a --check --tuned build/tune/merged
 ```
 
 `--check` is the number that says whether it worked: it runs the base and the
@@ -323,7 +323,7 @@ only delete cannot introduce a claim the source did not make.
 [heretic](https://github.com/p-e-w/heretic) over the checkpoint — no gradient
 step and no corpus, but a low rank edit subtracting the direction the residual
 stream moves in when the model is about to refuse — and writes the decensored
-weights to `build/tune/uncensored` in the same layout as `ckpt/lfm2.5-2.6b-a`, so the engine
+weights to `build/tune/uncensored` in the same layout as `data/models/lfm2.5-2.6b-a`, so the engine
 reads them unchanged. It needs `pip install heretic-llm`, and it needs a card:
 the search scores a hundred generations and a hundred forward passes per trial,
 two hundred trials by default.
@@ -339,7 +339,7 @@ weights 4-bit for a smaller card, and `--uncensor-out` writes somewhere else.
 The steps chain, so the whole thing is one command:
 
 ```sh
-python3 util/tune.py --model ckpt/lfm2.5-2.6b-a --uncensor --train --merge
+python3 util/tune.py --model data/models/lfm2.5-2.6b-a --uncensor --train --merge
 ```
 
 The adapter then trains over the decensored weights rather than over the base,
@@ -364,10 +364,10 @@ line — which is the only part of this that needs installing:
 
 ```sh
 pip install -e .                                  # lighteval and langdetect
-python3 util/eval.py --model ckpt/lfm2.5-2.6b-a            # the nine benchmarks
-python3 util/eval.py --model ckpt/lfm2.5-2.6b-a --samples 200   # a longer run
-python3 util/eval.py --tasks ifeval,boolq --model ckpt/lfm2.5-2.6b-a
-python3 util/eval.py --model ckpt/lfm2.5-2.6b-a --rival hf-inference-providers/Qwen/Qwen3-4B
+python3 util/eval.py --model data/models/lfm2.5-2.6b-a            # the nine benchmarks
+python3 util/eval.py --model data/models/lfm2.5-2.6b-a --samples 200   # a longer run
+python3 util/eval.py --tasks ifeval,boolq --model data/models/lfm2.5-2.6b-a
+python3 util/eval.py --model data/models/lfm2.5-2.6b-a --rival hf-inference-providers/Qwen/Qwen3-4B
 python3 util/eval.py --chart                      # redraw from the last results
 ```
 
@@ -432,8 +432,8 @@ over Vulkan:
 ```sh
 python3 util/make.py build --vulkan
 
-./build/app_main generate --model ckpt/lfm2.5-2.6b-a --backend vulkan --prompt "..."
-./build/app_yolo ckpt/yolo26/yolo26n.pt photo.png --device ""
+./build/app_main generate --model data/models/lfm2.5-2.6b-a --backend vulkan --prompt "..."
+./build/app_yolo data/models/yolo26/yolo26n.pt photo.png --device ""
 ```
 
 `--device` takes part of a device's name, or an empty string for the first one
@@ -464,4 +464,4 @@ about what a card would do. `TODO.md`'s device section says what is left.
 
 ## ↘️ DEVELOPMENT
 
-See `GUIDE.md` for the full tour, and `TODO.md` for what is still open.
+See `DESIGN.md` for the full tour, and `TODO.md` for what is still open.
